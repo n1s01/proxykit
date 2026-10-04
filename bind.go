@@ -35,6 +35,10 @@ type bypass struct {
 	next  atomic.Uint32
 }
 
+// BypassDialContext returns the bound dialer behind DialOptions.Bypass for
+// connections that are not proxy tunnels, such as diagnostics.
+func BypassDialContext(opts BypassOptions) (DialContextFunc, error) { return newBypassForward(opts) }
+
 // newBypassForward validates options and returns the bound forward dialer.
 func newBypassForward(opts BypassOptions) (DialContextFunc, error) {
 	if !bindSupported {

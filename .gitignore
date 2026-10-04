@@ -2,3 +2,4 @@ coverage.out
 *.test
 .DS_Store
 docs/tele-manager-audit.md
+*.exe
