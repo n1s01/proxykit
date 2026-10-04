@@ -1,0 +1,26 @@
+name: test
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            go: '1.22.x'
+          - os: ubuntu-latest
+            go: stable
+          - os: macos-latest
+            go: stable
+          - os: windows-latest
+            go: stable
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - run: go vet ./...
+      - run: go test -race -timeout 60s ./...
