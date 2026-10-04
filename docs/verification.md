@@ -48,5 +48,6 @@ CI workflow включает Go 1.22 и stable на Linux, stable на macOS и 
 удалённый CI в этой сессии не запускался.
 
 Внешние коммерческие прокси, Chromium и Telegram DC/MTProto не проверялись.
-Обход VPN проверен вручную на macOS при включённом VPN; на Linux и Windows —
+Обход VPN проверен вручную утилитой `examples/bypass` при включённом VPN:
+на macOS и на Windows с TUN-режимами sing-box, xray и Clash. На Linux —
 только компиляцией.
