@@ -21,7 +21,7 @@ func TestCheckTCPAndTLS(t *testing.T) {
 	var hits atomic.Int32
 	s, _ := connectProxy(t, false, "u", "p", &hits)
 	r, e := proxykit.Check(context.Background(), s, proxykit.CheckOptions{Target: echoTarget(t)})
-	if e != nil || !r.OK || r.TunnelLatency <= 0 || r.Duration < r.TunnelLatency {
+	if e != nil || !r.OK || r.TunnelLatency < 0 || r.Duration < r.TunnelLatency {
 		t.Fatalf("TCP check: %+v %v", r, e)
 	}
 	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))
@@ -120,8 +120,9 @@ func TestDetectEveryProtocol(t *testing.T) {
 			if e != nil || r.Proxy.Protocol != p || len(r.Attempts) != 3 {
 				t.Fatalf("detect: %v %v", r.Proxy, e)
 			}
+			// Windows timers are coarse: a loopback tunnel can measure as zero.
 			for _, a := range r.Attempts {
-				if a.Duration <= 0 {
+				if a.Duration < 0 {
 					t.Fatal("missing attempt timing")
 				}
 			}

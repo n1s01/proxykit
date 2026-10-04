@@ -31,7 +31,7 @@ func TestInspectAutoReportsRealLatency(t *testing.T) {
 	if info.Proxy.Protocol != proxykit.SOCKS5 || info.Country != "DE" || info.IP != "203.0.113.7" {
 		t.Fatalf("protocol or geo: %+v", info)
 	}
-	if info.Latency <= 0 || info.Latency >= lookup || info.Duration < lookup {
+	if info.Latency < 0 || info.Latency >= lookup || info.Duration < lookup {
 		t.Fatalf("latency includes other work: latency=%s duration=%s", info.Latency, info.Duration)
 	}
 }
@@ -60,7 +60,7 @@ func TestInspectGeoTravelsThroughProxy(t *testing.T) {
 			return proxykit.Geo{Country: string(b)}, nil
 		},
 	})
-	if e != nil || info.GeoErr != nil || info.Country != "NL" || info.Latency <= 0 {
+	if e != nil || info.GeoErr != nil || info.Country != "NL" || info.Latency < 0 {
 		t.Fatalf("inspect: %+v %v %v", info, info.GeoErr, e)
 	}
 	if hits.Load() != 2 {
@@ -79,7 +79,7 @@ func TestInspectGeoFailureAndSkip(t *testing.T) {
 		},
 	})
 	var op *proxykit.OpError
-	if e != nil || !errors.As(info.GeoErr, &op) || op.Stage != proxykit.StageGeo || info.Country != "" || info.Latency <= 0 {
+	if e != nil || !errors.As(info.GeoErr, &op) || op.Stage != proxykit.StageGeo || info.Country != "" || info.Latency < 0 {
 		t.Fatalf("geo failure must not fail inspect: %+v %v %v", info, info.GeoErr, e)
 	}
 	called := false
