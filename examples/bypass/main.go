@@ -9,6 +9,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
@@ -56,6 +57,7 @@ func run(iface, target, proxy string) bool {
 	normalLocal, normalIP, normalErr := probe((&net.Dialer{}).DialContext)
 	report(normalLocal, normalIP, normalErr)
 	fmt.Fprintln(out, "\n[2] bypass route (bound to the physical interface)")
+	stages(bound)
 	boundLocal, boundIP, boundErr := probe(bound)
 	report(boundLocal, boundIP, boundErr)
 
@@ -111,7 +113,49 @@ func listInterfaces() {
 		for _, addr := range list {
 			addrs = append(addrs, addr.String())
 		}
-		fmt.Fprintf(out, "  #%d %q flags=%s addrs=%s\n", iface.Index, iface.Name, iface.Flags, strings.Join(addrs, ", "))
+		fmt.Fprintf(out, "  #%d %q flags=%s mac=%q addrs=%s\n", iface.Index, iface.Name, iface.Flags, iface.HardwareAddr, strings.Join(addrs, ", "))
+	}
+}
+
+// stages tells apart what a VPN client lets through outside its tunnel.
+func stages(bound proxykit.DialContextFunc) {
+	step := func(name string, f func(context.Context) error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		started := time.Now()
+		if err := f(ctx); err != nil {
+			fmt.Fprintf(out, "    %-22s FAIL after %s: %v\n", name, time.Since(started).Round(time.Millisecond), err)
+			return
+		}
+		fmt.Fprintf(out, "    %-22s ok in %s\n", name, time.Since(started).Round(time.Millisecond))
+	}
+	tcp := func(addr string) func(context.Context) error {
+		return func(ctx context.Context) error {
+			c, err := bound(ctx, "tcp", addr)
+			if err == nil {
+				_ = c.Close()
+			}
+			return err
+		}
+	}
+	step("tcp 1.1.1.1:443", tcp("1.1.1.1:443"))
+	step("tcp 8.8.8.8:443", tcp("8.8.8.8:443"))
+	step("dns udp 1.1.1.1:53", func(ctx context.Context) error {
+		r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return bound(ctx, network, "1.1.1.1:53")
+		}}
+		_, err := r.LookupIP(ctx, "ip4", "api.ipify.org")
+		return err
+	})
+	for _, server := range []string{"1.1.1.1", "8.8.8.8", "77.88.8.8"} {
+		step("dns over tls "+server, func(ctx context.Context) error {
+			c, err := bound(ctx, "tcp", server+":853")
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			return tls.Client(c, &tls.Config{ServerName: server}).HandshakeContext(ctx)
+		})
 	}
 }
 
@@ -142,7 +186,7 @@ func probe(dial proxykit.DialContextFunc) (local, ip string, err error) {
 
 func report(local, ip string, err error) {
 	if local != "" {
-		fmt.Fprintf(out, "    local socket: %s\n", local)
+		fmt.Fprintf(out, "    local socket: %s (%s)\n", local, ownerOf(local))
 	}
 	if err != nil {
 		fmt.Fprintf(out, "    error: %v\n", err)
@@ -160,4 +204,19 @@ func unwrapAll(err error) error {
 		}
 		err = inner.Unwrap()
 	}
+}
+
+// ownerOf names the interface that holds the socket's local address.
+func ownerOf(local string) string {
+	host, _, _ := net.SplitHostPort(local)
+	ifaces, _ := net.Interfaces()
+	for _, iface := range ifaces {
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.String() == host {
+				return iface.Name
+			}
+		}
+	}
+	return "unknown interface"
 }
