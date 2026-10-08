@@ -8,9 +8,10 @@ import (
 
 // Layout describes field order and separators in a proxy string. Use host and
 // port once each, and optionally user/login/username and pass/password once each.
-// ip is an alias for host. The @ separator is allowed only between host and port;
-// all other fields use :. IPv6 fields must be bracketed. For example,
-// Layout("port@host:pass:login") assigns all four fields explicitly.
+// ip is an alias for host. A single @ is allowed either between host and port or
+// between a user/pass pair and an adjacent host and port; all other fields use :.
+// IPv6 fields must be bracketed. For example, Layout("port@host:pass:login")
+// assigns all four fields explicitly.
 type Layout string
 
 const (
@@ -31,8 +32,9 @@ type ParseOptions struct {
 // Parse parses one endpoint without guessing an absent wire protocol.
 func Parse(raw string) (Spec, error) { return ParseWithOptions(raw, ParseOptions{}) }
 
-// ParseWithOptions accepts standard URLs and fields separated by :; @ may
-// separate host and port in compact inputs. A nonzero Layout
+// ParseWithOptions accepts standard URLs and fields separated by :; in compact
+// inputs @ may separate host and port, or credentials and endpoint as in
+// user:pass@host:port and host:port@user:pass. A nonzero Layout
 // defines field order and exact separators, including after a protocol prefix.
 // Auto uses conventional host:port:user:pass and user:pass:host:port orders first.
 // Other orders are accepted only when unambiguous, with user before password.

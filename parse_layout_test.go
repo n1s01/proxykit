@@ -8,7 +8,8 @@ import (
 )
 
 func TestExplicitLayoutsAllOrdersAndSeparators(t *testing.T) {
-	// All 24 colon orders and the 12 orders with adjacent host/port joined by @.
+	// All 24 colon orders, the 12 orders with adjacent host/port joined by @, and
+	// the 8 orders with @ between a credential pair and an endpoint pair.
 	// Exercise DNS/IPv4/IPv6 and protocol prefixes. Numeric credentials ensure that field roles come from the layout.
 	orders := permutations([]string{"host", "port", "login", "pass"})
 	if len(orders) != 24 {
@@ -62,15 +63,21 @@ func permutations(fields []string) [][]string {
 	return out
 }
 
-// The format has only one possible @ position: the adjacent endpoint fields.
+// A single @ may join the adjacent endpoint fields or divide a credential pair
+// from an endpoint pair.
 func allowedLayoutMask(order []string, mask int) bool {
 	if mask == 0 {
 		return true
 	}
+	endpoint := func(field string) bool { return field == "host" || field == "port" }
 	for i := 0; i+1 < len(order); i++ {
-		if (order[i] == "host" && order[i+1] == "port") || (order[i] == "port" && order[i+1] == "host") {
-			return mask == 1<<i
+		if mask != 1<<i {
+			continue
 		}
+		if endpoint(order[i]) && endpoint(order[i+1]) {
+			return true
+		}
+		return i == 1 && endpoint(order[0]) == endpoint(order[1]) && endpoint(order[2]) == endpoint(order[3])
 	}
 	return false
 }
@@ -89,7 +96,7 @@ func TestAtCannotSeparateCredentialFields(t *testing.T) {
 			}
 		}
 	}
-	for _, raw := range []string{"u@p:host.test:8080", "host.test:8080:u@p", "host.test@8080@u@p", "u:p@host.test:8080"} {
+	for _, raw := range []string{"u@p:host.test:8080", "host.test:8080:u@p", "host.test@8080@u@p", "u:p@host.test@8080"} {
 		if _, err := Parse(raw); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("invalid compact @ format accepted: %v", err)
 		}
@@ -151,6 +158,36 @@ func TestAutomaticLayoutsAndReverseEndpoint(t *testing.T) {
 		if _, err := Parse(raw); !errors.Is(err, ErrAmbiguous) {
 			t.Fatalf("ambiguous fields were guessed: %v", err)
 		}
+	}
+}
+
+func TestAtDividesCredentialsFromEndpoint(t *testing.T) {
+	for _, raw := range []string{
+		"login:pass@proxy.example:1080",
+		"proxy.example:1080@login:pass",
+		"http://login:pass@proxy.example:1080",
+	} {
+		spec, err := Parse(raw)
+		if err != nil || spec.Host != "proxy.example" || spec.Port != 1080 || spec.Username != "login" || spec.Password != "pass" {
+			t.Fatalf("%s: %v", raw, err)
+		}
+	}
+	// The URL authority order wins when a numeric password makes both readings valid.
+	spec, err := Parse("login:8080@host.test:3071")
+	if err != nil || spec.Host != "host.test" || spec.Port != 3071 || spec.Username != "login" || spec.Password != "8080" {
+		t.Fatalf("numeric password changed endpoint: %v", err)
+	}
+	spec, err = Parse("192.0.2.1:8080@login:pass")
+	if err != nil || spec.Host != "192.0.2.1" || spec.Port != 8080 || spec.Username != "login" || spec.Password != "pass" {
+		t.Fatalf("reversed credentials: %v", err)
+	}
+	spec, err = ParseWithOptions("secret:alice@[::1]:1080", ParseOptions{Layout: "pass:login@host:port"})
+	if err != nil || spec.Host != "::1" || spec.Port != 1080 || spec.Username != "alice" || spec.Password != "secret" {
+		t.Fatalf("explicit credential layout: %v", err)
+	}
+	specs, failures := ParseLines("j3q9jBNN:xBYEKEAf@dc01.proxy.example:3071\n0KHdNey2:3fphh1oy@dc04.proxy.example:3071", ParseOptions{})
+	if len(specs) != 2 || len(failures) != 0 || specs[1].Host != "dc04.proxy.example" || specs[1].Username != "0KHdNey2" {
+		t.Fatal("credential list was not parsed")
 	}
 }
 

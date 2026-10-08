@@ -51,20 +51,35 @@ func parseLayout(layout Layout) (fieldLayout, error) {
 		return fieldLayout{}, invalid("layout requires host and port")
 	}
 	if !validSeparators(out.fields, separators) {
-		return fieldLayout{}, invalid("@ must separate host and port")
+		return fieldLayout{}, invalid("@ must separate host and port, or credentials and endpoint")
 	}
 	return out, nil
 }
 
+// validSeparators allows a single @, either joining the endpoint pair or
+// dividing a credential pair from an adjacent host and port.
 func validSeparators(fields []proxyField, separators []byte) bool {
+	at := -1
 	for i, separator := range separators {
-		if separator == '@' && !((fields[i] == fieldHost && fields[i+1] == fieldPort) ||
-			(fields[i] == fieldPort && fields[i+1] == fieldHost)) {
+		if separator != '@' {
+			continue
+		}
+		if at >= 0 {
 			return false
 		}
+		at = i
 	}
-	return true
+	if at < 0 {
+		return true
+	}
+	if isEndpoint(fields[at]) && isEndpoint(fields[at+1]) {
+		return true
+	}
+	return at == 1 && len(fields) == 4 &&
+		isEndpoint(fields[0]) == isEndpoint(fields[1]) && isEndpoint(fields[2]) == isEndpoint(fields[3])
 }
+
+func isEndpoint(field proxyField) bool { return field == fieldHost || field == fieldPort }
 
 // splitFields bounds allocations and keeps bracketed IPv6 addresses intact.
 // Empty credentials are meaningful, so fields are not trimmed or discarded.
@@ -177,7 +192,15 @@ func parseAutoFields(raw string, protocol Protocol) (Spec, error) {
 		candidates = append(candidates, spec)
 	}
 	if len(values) == 4 {
-		// Keep conventional field orders, with @ restricted to the endpoint pair.
+		// user:pass@host:port is the URL authority order, so it wins over the
+		// reversed host:port@user:pass reading when both happen to be valid.
+		if separators[1] == '@' {
+			add([]proxyField{fieldUser, fieldPass, fieldHost, fieldPort})
+			if len(candidates) == 1 {
+				return candidates[0], nil
+			}
+		}
+		// Keep conventional field orders.
 		add([]proxyField{fieldHost, fieldPort, fieldUser, fieldPass})
 		add([]proxyField{fieldUser, fieldPass, fieldHost, fieldPort})
 		if len(candidates) > 0 {
