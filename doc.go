@@ -12,6 +12,7 @@
 //
 // New is the high-level entry point: it returns a Dialer after parsing and any
 // required discovery. Dialer shares its configuration across traffic, checks
-// and HTTP transports. The optional relay subpackage provides a browser adapter.
+// and HTTP transports. The optional relay subpackage provides a browser adapter;
+// gateway reads and writes rotating-proxy parameters encoded in credentials.
 // Public types are defined here; protocol handshakes are private implementation.
 package proxykit

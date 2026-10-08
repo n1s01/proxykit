@@ -84,6 +84,7 @@ proxykit/
 ├── bind.go, bind_*.go            # обход VPN: привязка к физическому интерфейсу
 ├── *_test.go                    # unit, external API, сетевые тесты, fuzz
 ├── relay/                       # отдельный браузерный адаптер
+├── gateway/                     # параметры ротационных прокси в логине
 ├── examples/{tcp,http,browser}/  # компилируемые примеры
 ├── docs/                        # архитектура, аудит, результаты проверок
 ├── Makefile
@@ -91,7 +92,8 @@ proxykit/
 ```
 
 Основной импорт — `github.com/n1s01/proxykit`; браузерный адаптер подключается
-как `github.com/n1s01/proxykit/relay`. Публичные типы и функции определены
+как `github.com/n1s01/proxykit/relay`, параметры ротационных прокси — как
+`github.com/n1s01/proxykit/gateway`. Публичные типы и функции определены
 напрямую в своих файлах. Фасада с алиасами и отдельных пакетов для каждого
 этапа операции нет. Файлы одного Go-пакета разделяют область видимости:
 разделение по файлам помогает навигации, приватные детали остаются неэкспортируемыми.
@@ -194,6 +196,74 @@ Unicode-домены предварительно преобразуйте в pu
 объект и кортеж уже содержат роли полей. Дробные порты и `rdns=false` отклоняются.
 `ParseLines` применяет одни ParseOptions ко всем строкам, игнорирует пустые строки
 и комментарии `#`, возвращает значения и ошибки с номерами строк.
+
+## Ротационные прокси
+
+Ротационные (backconnect) провайдеры кодируют страну, sticky-сессию и её время
+жизни тегами в логине: `acct1-country-RU-session-ab12cd34ef-time-1440`. `Parse`
+кладёт такой логин в `Spec.Username` целиком; пакет `gateway` разбирает его на
+параметры и собирает обратно. Сети и состояния у него нет.
+
+```go
+// import "github.com/n1s01/proxykit/gateway"
+spec, _ := proxykit.Parse("http://acct1-country-RU-session-ab12cd34ef-time-1440:secret@gw.example:6969")
+
+base, params, _ := gateway.Nova.Split(spec)
+// base.Username == "acct1"; params: Country "RU", Session "ab12cd34ef", TTL 24h
+
+sticky, _ := gateway.Nova.Apply(base, gateway.Params{
+    Country: "DE", Session: gateway.NewSession(), TTL: 30 * time.Minute,
+})
+rotating, _ := gateway.Nova.Apply(base, gateway.Params{Country: "DE"}) // новый IP на соединение
+
+d, err := proxykit.NewDialer(sticky, proxykit.DialOptions{})
+```
+
+Одним вызовом из обычной строки провайдера — готовый прокси с протоколом:
+
+```go
+d, err := gateway.Nova.New(ctx, "gw.example:6969:acct1:secret",
+    gateway.Params{Country: "RU", TTL: 24 * time.Hour},
+    proxykit.Options{Target: "web.telegram.org:443"})
+if err != nil { return err }
+ready := d.Spec()              // протокол определён, логин с тегами
+line := ready.URL().String()   // http://acct1-country-RU-session-k3x9…-time-1440:secret@gw.example:6969
+```
+
+`Format.New` разбирает строку, дописывает параметры и возвращает тот же `Dialer`,
+что и `proxykit.New`. Если задан `TTL`, а `Session` пуст, сессия создаётся сама.
+Протокол без префикса в строке определяется через сеть по `Options.Target`;
+`http://…` в строке или `Options.Parse.DefaultProtocol` обходятся без сети.
+
+`Format` — описание провайдера: какой тег за что отвечает. `gateway.Nova` —
+готовое описание NovaProxy (`country`, `session`, `time` в минутах). Другой
+провайдер задаётся значением, без правки библиотеки:
+
+```go
+other := gateway.Format{Country: "country", Session: "ssid"}
+// name_x-country-SI-ssid-G4h30cvPLL
+
+custom := gateway.Format{
+    Separator: "_", Session: "sid", TTL: "life", TTLUnit: time.Second,
+    InPassword: true, // теги в пароле, а не в логине
+}
+```
+
+Первый фрагмент логина всегда считается базой. Фрагменты, которых `Format` не
+называет (дефис в самом логине, теги вроде `city-moscow`), сохраняются на своих
+местах. `Apply` выставляет ровно переданные `Params`: известные теги из исходной
+строки заменяются или убираются, поэтому пустой `Session` превращает sticky-прокси
+в ротационный. Значения буквальные, регистр страны не меняется. Повтор тега, тег
+без значения, TTL без сессии или не кратный единице формата, параметр без тега в
+`Format` дают `ErrInvalid`.
+
+Без сессии IP меняется на каждое TCP-соединение. `Check` и `Inspect` открывают
+свои соединения, поэтому показывают не тот выход, через который пойдёт трафик;
+с keep-alive в `Transport` адрес держится, пока живо соединение. Одинаковые
+ротационные строки в списке — один и тот же прокси: `ParseLines` дубликаты
+сохраняет, а раздать каждой свою сессию через `NewSession` — задача приложения.
+Момент смены сессии и привязку сессий к аккаунтам библиотека не выбирает:
+новый IP — это новый `Spec` и новый `Dialer`.
 
 ## TCP и HTTP
 
@@ -383,7 +453,7 @@ Relay не имеет локальной авторизации: им может
 ## Проверка проекта
 
 ```sh
-go test -race -coverpkg=.,./relay -coverprofile=coverage.out ./...
+go test -race -coverpkg=.,./relay,./gateway -coverprofile=coverage.out ./...
 go vet ./...
 go test . -run='^$' -fuzz='^FuzzParse$' -fuzztime=10s
 go test . -run='^$' -fuzz='^FuzzParseWithLayout$' -fuzztime=10s
@@ -398,7 +468,7 @@ TLS trust, отмена, timeout, buffered bytes, payload >64 KiB, HTTP status/r
 Те же команды доступны как `make test`, `make race`, `make coverage`, `make vet`,
 `make fuzz` (оба fuzz targets). `make check` выполняет vet и race tests. Unit-тесты расположены рядом
 с кодом, сетевые интеграционные тесты используют пакет `proxykit_test`
-и импортируют публичный API как внешний проект. `-coverpkg=.,./relay` учитывает основной пакет и relay;
+и импортируют публичный API как внешний проект. `-coverpkg=.,./relay,./gateway` учитывает основной пакет, relay и gateway;
 исполняемые примеры компилируются, но в процент покрытия библиотеки не входят.
 
 Протокольные источники:
