@@ -38,3 +38,25 @@ func TestDialFirstSkipsDeadAddress(t *testing.T) {
 		t.Fatal("expected an error without addresses")
 	}
 }
+
+func TestPreferRouted(t *testing.T) {
+	// The adapter order of the machine this was reported on: a VirtualBox
+	// host-only adapter is listed before the one that reaches the internet.
+	hostOnly, ethernet, wifi := &net.Interface{Index: 12}, &net.Interface{Index: 11}, &net.Interface{Index: 7}
+	candidates := []*net.Interface{hostOnly, ethernet, wifi}
+	for _, tc := range []struct {
+		name   string
+		routed []int
+		want   *net.Interface
+	}{
+		{"default route wins over order", []int{11}, ethernet},
+		{"best metric first", []int{7, 11}, wifi},
+		{"tunnel route is skipped", []int{40, 11}, ethernet},
+		{"no routed candidate", []int{40}, hostOnly},
+		{"routing table unknown", nil, hostOnly},
+	} {
+		if got := preferRouted(candidates, tc.routed); got != tc.want {
+			t.Errorf("%s: picked #%d, want #%d", tc.name, got.Index, tc.want.Index)
+		}
+	}
+}

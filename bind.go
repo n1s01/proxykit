@@ -16,9 +16,11 @@ import (
 // through the tunnel: without a physical interface the dial fails with
 // ErrNoInterface. Loopback proxies are never bound.
 type BypassOptions struct {
-	// Interface pins a network interface by name. Empty selects the first
-	// running interface with a MAC address and a routable IPv4 address whose
-	// name does not look like a tunnel or a virtual switch.
+	// Interface pins a network interface by name. Empty selects a running
+	// interface with a MAC address and a routable IPv4 address whose name does
+	// not look like a tunnel or a virtual switch. Where the routing table is
+	// read (Windows), the one with the best default route wins; elsewhere the
+	// first.
 	Interface string
 	// DNS lists ip:port resolvers queried over the same interface, round-robin.
 	// Under a VPN the system resolver may return tunnel-only (fake-ip) addresses.
@@ -251,6 +253,7 @@ func (b *bypass) pick() (*net.Interface, error) {
 	if err != nil {
 		return nil, err
 	}
+	var candidates []*net.Interface
 	for i := range ifaces {
 		iface := &ifaces[i]
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagRunning == 0 ||
@@ -265,11 +268,30 @@ func (b *bypass) pick() (*net.Interface, error) {
 		addrs, _ := iface.Addrs()
 		for _, addr := range addrs {
 			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil && !ipnet.IP.IsLinkLocalUnicast() {
-				return iface, nil
+				candidates = append(candidates, iface)
+				break
 			}
 		}
 	}
-	return nil, ErrNoInterface
+	if len(candidates) == 0 {
+		return nil, ErrNoInterface
+	}
+	return preferRouted(candidates, defaultRouteInterfaces()), nil
+}
+
+// preferRouted returns the candidate that owns the best default route; routed
+// lists interface indexes, best metric first. Host-only and internal adapters
+// of hypervisors look physical but lead nowhere, and binding to one fails with
+// "network unreachable". Without a routed candidate the first one is kept.
+func preferRouted(candidates []*net.Interface, routed []int) *net.Interface {
+	for _, index := range routed {
+		for _, iface := range candidates {
+			if iface.Index == index {
+				return iface
+			}
+		}
+	}
+	return candidates[0]
 }
 
 // virtualName matches tunnel, bridge and hypervisor adapters by name. It backs
