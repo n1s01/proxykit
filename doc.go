@@ -8,7 +8,8 @@
 //
 // DialOptions.Bypass binds connections to the proxy to a physical interface,
 // around VPN/WARP tunnels. Inspect reports protocol, real tunnel latency and
-// exit country in one call.
+// exit country in one call. SpeedTest reports reachability and download speed
+// to a caller-supplied endpoint in one call.
 //
 // New is the high-level entry point: it returns a Dialer after parsing and any
 // required discovery. Dialer shares its configuration across traffic, checks

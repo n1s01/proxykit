@@ -92,12 +92,21 @@ func (d *Dialer) Check(ctx context.Context, opts CheckOptions) (CheckResult, err
 // OpError distinguishes proxy connection/authentication from target TLS/HTTP.
 // CheckResult.Proxy contains credentials when marshaled as JSON.
 func check(parent context.Context, s Spec, d ContextDialer, opts CheckOptions) (result CheckResult, err error) {
+	return checkResponse(parent, s, d, opts, nil)
+}
+
+// checkResponse is check with an optional handler for the open response body.
+// A non-nil handle runs after the status check succeeded and before the tunnel
+// is closed; it must not close the body. Health.OK stays tied to the response
+// headers even when handle later fails.
+func checkResponse(parent context.Context, s Spec, d ContextDialer, opts CheckOptions, handle func(*http.Response, net.Conn) error) (result CheckResult, err error) {
 	startedCheck := time.Now()
 	result.Proxy = s
 	result.StartedAt = startedCheck.UTC()
 	defer func() {
-		result.Duration = time.Since(startedCheck)
-		result.OK = err == nil
+		if result.Duration == 0 {
+			result.Duration = time.Since(startedCheck)
+		}
 	}()
 	target, u, e := checkTarget(opts)
 	if e != nil {
@@ -145,6 +154,7 @@ func check(parent context.Context, s Spec, d ContextDialer, opts CheckOptions) (
 	defer func() { _ = c.Close() }()
 	if u == nil {
 		if opts.TLSConfig == nil {
+			result.OK = true
 			return result, nil
 		}
 		cfg := opts.TLSConfig.Clone()
@@ -159,6 +169,7 @@ func check(parent context.Context, s Spec, d ContextDialer, opts CheckOptions) (
 			}
 			return result, &OpError{Stage: StageTargetTLS, Protocol: s.Protocol, Err: e}
 		}
+		result.OK = true
 		return result, nil
 	}
 	// Use net/http's framing, header limits and TLS behavior, but consume the
@@ -172,6 +183,8 @@ func check(parent context.Context, s Spec, d ContextDialer, opts CheckOptions) (
 			return c, nil
 		},
 		DisableKeepAlives: true, MaxResponseHeaderBytes: 64 << 10,
+		// Speed tests measure wire bytes; do not transparently decompress.
+		DisableCompression: handle != nil,
 	}
 	if opts.TLSConfig != nil {
 		tr.TLSClientConfig = opts.TLSConfig.Clone()
@@ -204,6 +217,9 @@ func check(parent context.Context, s Spec, d ContextDialer, opts CheckOptions) (
 	if e != nil {
 		return result, invalid("check request")
 	}
+	if handle != nil {
+		req.Header.Set("Accept-Encoding", "identity")
+	}
 	resp, e := client.Do(req)
 	if e != nil {
 		var op *OpError
@@ -234,6 +250,14 @@ func check(parent context.Context, s Spec, d ContextDialer, opts CheckOptions) (
 	if !ok {
 		return result, &OpError{Stage: StageHTTP, Protocol: s.Protocol, StatusCode: resp.StatusCode, Err: ErrStatus}
 	}
-	// Health means successful response headers, not a speed test or full download.
+	// Headers are a successful health check; the body is optional and only read
+	// when a caller asks for a speed measurement.
+	result.OK = true
+	result.Duration = time.Since(startedCheck)
+	if handle != nil {
+		if e := handle(resp, c); e != nil {
+			return result, e
+		}
+	}
 	return result, nil
 }

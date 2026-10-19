@@ -80,12 +80,13 @@ proxykit/
 ├── http_connect.go, socks5.go    # протокольные handshake
 ├── http.go                      # адаптер net/http
 ├── check.go, detect.go, batch.go # проверки и определение протокола
+├── speed.go                      # здоровье и скорость скачивания через прокси
 ├── inspect.go                   # протокол, задержка и страна одним вызовом
 ├── bind.go, bind_*.go            # обход VPN: привязка к физическому интерфейсу
 ├── *_test.go                    # unit, external API, сетевые тесты, fuzz
 ├── relay/                       # отдельный браузерный адаптер
 ├── gateway/                     # параметры ротационных прокси в логине
-├── examples/{tcp,http,browser}/  # компилируемые примеры
+├── examples/{tcp,http,speed,browser}/ # компилируемые примеры
 ├── docs/                        # архитектура, аудит, результаты проверок
 ├── Makefile
 └── .github/workflows/test.yml
@@ -379,7 +380,8 @@ outcomes, err := proxykit.CheckAll(ctx, specs, proxykit.BatchOptions{
 - `Target` вместе с `TLSConfig`: дополнительно проверка TLS целевого сервера.
 - `CheckOptions{URL: "https://host/health"}`: TLS + GET, ожидаются HTTP 200–299.
 - `StatusCodes` меняет список допустимых ответов; redirect не выполняется.
-- Проверка HTTP завершается на заголовках ответа. Это не загрузка тела и не speed test.
+- Проверка HTTP завершается на заголовках ответа. Это не загрузка тела; для
+  скорости используйте `SpeedTest`.
 - `TunnelLatency` измеряет создание туннеля; `Duration` — всю проверку.
   Это не ICMP ping. Геолокацию делает только `Inspect`.
 - `CheckAll` запускает фиксированное количество workers, по умолчанию 16,
@@ -387,6 +389,39 @@ outcomes, err := proxykit.CheckAll(ctx, specs, proxykit.BatchOptions{
 - `Detect` параллельно проверяет максимум три протокола и закрывает все пробные
   соединения перед возвратом. Если proxy поддерживает несколько протоколов,
   побеждает первый успешный. Для фиксированного выбора укажите протокол явно.
+
+### Здоровье и скорость
+
+```go
+result, err := proxykit.SpeedTest(ctx, spec, proxykit.SpeedTestOptions{
+    URL:         "https://speed.example/10mb", // endpoint, куда качаем
+    MaxBytes:    10 << 20,                     // по умолчанию 10 МиБ
+    MaxDuration: 10 * time.Second,             // по умолчанию 10 секунд
+    Timeout:     15 * time.Second,             // весь тест, по умолчанию 15 секунд
+})
+// result.Health.OK, result.Health.TunnelLatency, result.Health.StatusCode
+// result.Speed.Bytes, result.Speed.BytesPerSecond, result.Speed.MegabitsPerSecond
+```
+
+`SpeedTest` открывает один туннель через прокси, проверяет статус endpoint и
+читает тело на том же туннеле. `Health.OK` показывает, что прокси жив и endpoint
+ответил допустимым статусом; `Speed` — фактическую скорость скачивания.
+
+- `Speed.Complete=false` означает, что загрузку остановили `MaxDuration` или
+  `Timeout`; скорость посчитана по уже прочитанным байтам.
+- Редиректы не выполняются, `StatusCodes` задаёт допустимые ответы.
+- Сжатие отключено, поэтому считаются байты, реально прошедшие через прокси.
+- Для собственного маршрута, TLS к HTTPS-прокси или обхода VPN используйте
+  `NewDialer(...).SpeedTest(ctx, opts)`.
+- Health-проверка без скачивания тела остаётся в `Check`.
+
+Готовый пример:
+
+```sh
+PROXY_URL='socks5://user:pass@host:1080' \
+TARGET_URL='https://speed.example/10mb' \
+go run ./examples/speed
+```
 
 ### Полная информация о прокси
 

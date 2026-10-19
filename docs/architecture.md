@@ -48,6 +48,7 @@ graph LR
 | Проверить через тот же маршрут | `Dialer.Check(ctx, CheckOptions)` |
 | Проверить с параметрами подключения по умолчанию | `Check` |
 | Проверить несколько прокси | `CheckAll(ctx, specs, BatchOptions)` |
+| Проверить здоровье и скорость | `SpeedTest`, `Dialer.SpeedTest` |
 | Узнать протокол, задержку и страну | `Inspect`, `Dialer.Inspect` |
 | Обойти VPN/WARP | `DialOptions.Bypass` |
 | Запустить браузерный адаптер | `relay.Start(dialer, relay.Options)` |
@@ -101,6 +102,7 @@ SOCKS5 использует удалённое разрешение имени �
 | Успешно возвращённый TCP-туннель | вызывающий код |
 | Пробные туннели, включая проигравшие кандидаты | `Detect` до возврата |
 | Проверочный туннель | `Check` до возврата |
+| Туннель замера скорости | `SpeedTest` до возврата |
 | Простой HTTP transport | вызывающий код через `CloseIdleConnections` |
 | Listener, запросы и CONNECT-туннели адаптера | `relay.Server.Close` |
 
