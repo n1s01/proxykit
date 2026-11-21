@@ -40,7 +40,7 @@ func TestDialerSharesConfiguredRouteAcrossTrafficAndChecks(t *testing.T) {
 		return client, nil
 	}
 	c, err := proxykit.New(context.Background(), "http://proxy.test:8080", proxykit.Options{
-		Dial: proxykit.DialOptions{Forward: forward},
+		Dial: proxykit.DialOptions{Advanced: proxykit.AdvancedDialOptions{Forward: forward}},
 	})
 	if err != nil {
 		t.Fatal(err)

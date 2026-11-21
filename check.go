@@ -69,8 +69,8 @@ func checkTarget(opts CheckOptions) (string, *url.URL, error) {
 	return net.JoinHostPort(u.Hostname(), p), u, nil
 }
 
-// Check tests a resolved proxy using the default connection settings.
-// For custom routing or proxy TLS, construct a Dialer and use its Check method.
+// Check tests a resolved proxy with zero DialOptions (VPN bypass on). For
+// another route or proxy TLS, construct a Dialer and use its Check method.
 func Check(ctx context.Context, spec Spec, opts CheckOptions) (CheckResult, error) {
 	d, err := NewDialer(spec, DialOptions{})
 	if err != nil {

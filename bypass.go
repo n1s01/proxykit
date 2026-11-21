@@ -1,9 +1,21 @@
 package proxykit
 
+// VPN bypass: the DEFAULT route for every connection to a proxy.
+//
+// The socket to the proxy is pinned to a physical interface (Wi-Fi/Ethernet),
+// so a VPN/WARP/TUN client on the same machine does not carry proxy traffic.
+// Names are resolved over that same interface, because a VPN resolver may
+// answer with tunnel-only fake-ip addresses. There is no fallback through the
+// tunnel: without a physical interface the dial fails with ErrNoInterface.
+//
+// This file is portable. Everything OS-specific goes through `backend`
+// (platform.go, platform_<os>.go). Route selection lives in route.go.
+
 import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -11,29 +23,34 @@ import (
 	"time"
 )
 
-// BypassOptions routes connections to the proxy through a physical network
-// interface, skipping VPN/WARP tunnels (TUN). There is deliberately no fallback
-// through the tunnel: without a physical interface the dial fails with
-// ErrNoInterface. Loopback proxies are never bound.
+// BypassOptions tunes the default bypass route. The zero value is the
+// recommended setting: pick the interface automatically and use public DNS.
+// To turn bypass off, use DialOptions.Advanced.DisableBypass instead.
 type BypassOptions struct {
-	// Interface pins a network interface by name. Empty selects a running
-	// interface with a MAC address and a routable IPv4 address whose name does
-	// not look like a tunnel or a virtual switch. Where the routing table is
-	// read (Windows), the one with the best default route wins; elsewhere the
-	// first.
+	// Interface pins a network interface by name ("en0", "eth0", "Wi-Fi").
+	// Empty selects a running interface with a MAC address, broadcast and a
+	// routable IPv4 address whose name does not look like a tunnel; among
+	// those, the one owning the best default route wins (see Platform).
 	Interface string
-	// DNS lists ip:port resolvers queried over the same interface, round-robin.
-	// Under a VPN the system resolver may return tunnel-only (fake-ip) addresses.
-	// Nil uses 1.1.1.1, 8.8.8.8 and 77.88.8.8. When plain DNS gets no answer,
-	// the same servers are asked over TLS on port 853.
+	// DNS lists ip:port resolvers queried over the same interface,
+	// round-robin. Nil uses 1.1.1.1, 8.8.8.8 and 77.88.8.8. When plain DNS
+	// gets no answer, the same servers are asked over TLS on port 853.
 	DNS []string
 }
 
-// BypassSupported reports whether interface binding exists for this platform.
-// Where it does not, NewDialer rejects DialOptions.Bypass with ErrBypassUnsupported.
-func BypassSupported() bool { return bindSupported }
+func (o BypassOptions) isZero() bool { return o.Interface == "" && len(o.DNS) == 0 }
 
 var defaultBypassDNS = []string{"1.1.1.1:53", "8.8.8.8:53", "77.88.8.8:53"}
+
+// BypassDialContext returns the bound dialer behind the default route, for
+// connections that are not proxy tunnels (diagnostics, IP checks).
+func BypassDialContext(opts BypassOptions) (DialContextFunc, error) {
+	b, err := newBypass(opts)
+	if err != nil {
+		return nil, err
+	}
+	return b.dial, nil
+}
 
 type bypass struct {
 	iface string
@@ -44,14 +61,10 @@ type bypass struct {
 	plain, secure *net.Resolver
 }
 
-// BypassDialContext returns the bound dialer behind DialOptions.Bypass for
-// connections that are not proxy tunnels, such as diagnostics.
-func BypassDialContext(opts BypassOptions) (DialContextFunc, error) { return newBypassForward(opts) }
-
-// newBypassForward validates options and returns the bound forward dialer.
-func newBypassForward(opts BypassOptions) (DialContextFunc, error) {
-	if !bindSupported {
-		return nil, ErrBypassUnsupported
+func newBypass(opts BypassOptions) (*bypass, error) {
+	if !BypassSupported() {
+		return nil, fmt.Errorf("%w (GOOS=%s); set DialOptions.Advanced.DisableBypass to use the system route",
+			ErrBypassUnsupported, CurrentPlatform().OS)
 	}
 	dns := append([]string(nil), opts.DNS...)
 	if len(dns) == 0 {
@@ -69,7 +82,7 @@ func newBypassForward(opts BypassOptions) (DialContextFunc, error) {
 	b := &bypass{iface: opts.Interface, dns: dns}
 	b.plain = &net.Resolver{PreferGo: true, Dial: b.dialDNS}
 	b.secure = &net.Resolver{PreferGo: true, Dial: b.dialDoT}
-	return b.dial, nil
+	return b, nil
 }
 
 func (b *bypass) dial(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -78,11 +91,20 @@ func (b *bypass) dial(ctx context.Context, network, addr string) (net.Conn, erro
 	if err != nil || net.ParseIP(host) != nil {
 		return d.DialContext(ctx, network, addr)
 	}
+	if isLocalhost(host) {
+		// Public DNS does not know localhost; loopback is never bound anyway.
+		return (&net.Dialer{KeepAlive: 30 * time.Second}).DialContext(ctx, network, addr)
+	}
 	ips, err := b.lookup(ctx, network, host)
 	if err != nil {
 		return nil, err
 	}
 	return dialFirst(ctx, d, network, ips, port)
+}
+
+func isLocalhost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	return host == "localhost" || strings.HasSuffix(host, ".localhost")
 }
 
 // dialFirst connects to whichever address answers first. A new attempt starts
@@ -98,7 +120,7 @@ func dialFirst(ctx context.Context, d *net.Dialer, network string, ips []net.IP,
 	results := make(chan result, len(ips))
 	next := time.NewTimer(0)
 	defer next.Stop()
-	err := error(invalid("host has no addresses"))
+	err := invalid("host has no addresses")
 	for started, pending := 0, 0; started < len(ips) || pending > 0; {
 		select {
 		case <-next.C:
@@ -119,17 +141,20 @@ func dialFirst(ctx context.Context, d *net.Dialer, network string, ips []net.IP,
 				next.Reset(0)
 				continue
 			}
-			go func(pending int) {
-				for ; pending > 0; pending-- {
-					if late := <-results; late.conn != nil {
-						_ = late.conn.Close()
-					}
-				}
-			}(pending)
+			go drainConns(results, pending, func(r result) net.Conn { return r.conn })
 			return r.conn, nil
 		}
 	}
 	return nil, err
+}
+
+// drainConns closes connections that lost a race after the winner returned.
+func drainConns[T any](results <-chan T, pending int, conn func(T) net.Conn) {
+	for ; pending > 0; pending-- {
+		if c := conn(<-results); c != nil {
+			_ = c.Close()
+		}
+	}
 }
 
 // lookup resolves over the physical interface. VPN clients in strict-route
@@ -209,18 +234,13 @@ func (b *bypass) dialDoT(ctx context.Context, _, _ string) (net.Conn, error) {
 			err = r.err
 			continue
 		}
-		go func(pending int) {
-			for ; pending > 0; pending-- {
-				if late := <-results; late.conn != nil {
-					_ = late.conn.Close()
-				}
-			}
-		}(pending - 1)
+		go drainConns(results, pending-1, func(r result) net.Conn { return r.conn })
 		return r.conn, nil
 	}
 	return nil, err
 }
 
+// control runs before connect(2) on every socket the bypass opens.
 func (b *bypass) control(network, address string, c syscall.RawConn) error {
 	if host, _, err := net.SplitHostPort(address); err == nil {
 		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
@@ -233,11 +253,14 @@ func (b *bypass) control(network, address string, c syscall.RawConn) error {
 	}
 	var opErr error
 	if err = c.Control(func(fd uintptr) {
-		opErr = bindSocket(fd, strings.HasSuffix(network, "6"), iface)
+		opErr = backend.bind(fd, strings.HasSuffix(network, "6"), iface)
 	}); err != nil {
 		return err
 	}
-	return opErr
+	if opErr != nil {
+		return fmt.Errorf("bind socket to %q: %w", iface.Name, opErr)
+	}
+	return nil
 }
 
 // pick is evaluated per connection: interfaces come and go with Wi-Fi and VPN.
@@ -255,33 +278,38 @@ func (b *bypass) pick() (*net.Interface, error) {
 	}
 	var candidates []*net.Interface
 	for i := range ifaces {
-		iface := &ifaces[i]
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagRunning == 0 ||
-			iface.Flags&(net.FlagLoopback|net.FlagPointToPoint) != 0 || !physicalName(iface.Name) {
-			continue
-		}
-		// TUN adapters (Wintun, utun) are layer 3: no MAC and no broadcast. This
-		// catches tunnels whatever the VPN client chose to call them.
-		if len(iface.HardwareAddr) == 0 || iface.Flags&net.FlagBroadcast == 0 {
-			continue
-		}
-		addrs, _ := iface.Addrs()
-		for _, addr := range addrs {
-			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil && !ipnet.IP.IsLinkLocalUnicast() {
-				candidates = append(candidates, iface)
-				break
-			}
+		if iface := &ifaces[i]; physicalCandidate(iface) {
+			candidates = append(candidates, iface)
 		}
 	}
 	if len(candidates) == 0 {
 		return nil, ErrNoInterface
 	}
-	return preferRouted(candidates, defaultRouteInterfaces()), nil
+	return preferRouted(candidates, backend.defaultRoutes()), nil
+}
+
+func physicalCandidate(iface *net.Interface) bool {
+	if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagRunning == 0 ||
+		iface.Flags&(net.FlagLoopback|net.FlagPointToPoint) != 0 || !backend.physicalName(iface.Name) {
+		return false
+	}
+	// TUN adapters (Wintun, utun) are layer 3: no MAC and no broadcast. This
+	// catches tunnels whatever the VPN client chose to call them.
+	if len(iface.HardwareAddr) == 0 || iface.Flags&net.FlagBroadcast == 0 {
+		return false
+	}
+	addrs, _ := iface.Addrs()
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil && !ipnet.IP.IsLinkLocalUnicast() {
+			return true
+		}
+	}
+	return false
 }
 
 // preferRouted returns the candidate that owns the best default route; routed
-// lists interface indexes, best metric first. Host-only and internal adapters
-// of hypervisors look physical but lead nowhere, and binding to one fails with
+// lists interface indexes, best first. Host-only and internal adapters of
+// hypervisors look physical but lead nowhere, and binding to one fails with
 // "network unreachable". Without a routed candidate the first one is kept.
 func preferRouted(candidates []*net.Interface, routed []int) *net.Interface {
 	for _, index := range routed {
@@ -292,21 +320,4 @@ func preferRouted(candidates []*net.Interface, routed []int) *net.Interface {
 		}
 	}
 	return candidates[0]
-}
-
-// virtualName matches tunnel, bridge and hypervisor adapters by name. It backs
-// physicalName on systems without a naming scheme for physical interfaces.
-func virtualName(name string) bool {
-	name = strings.ToLower(name)
-	for _, mark := range []string{
-		"tun", "tap", "wg", "ppp", "warp", "vpn", "wireguard", "tailscale", "zerotier", "zt",
-		"xray", "v2ray", "sing-box", "clash", "mihomo", "hiddify", "nekoray", "outline",
-		"nordlynx", "ipsec", "docker", "veth", "br-", "virbr", "vmnet", "vmware", "virtual",
-		"vethernet", "hyper-v", "loopback", "bluetooth",
-	} {
-		if strings.Contains(name, mark) {
-			return true
-		}
-	}
-	return false
 }

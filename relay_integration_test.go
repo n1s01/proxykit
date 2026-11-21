@@ -111,7 +111,7 @@ func TestRelayCloseCancelsPendingHandshake(t *testing.T) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	d, _ := proxykit.NewDialer(proxykit.Spec{Protocol: proxykit.HTTP, Host: "proxy.test", Port: 80, Username: "", Password: ""}, proxykit.DialOptions{Forward: forward})
+	d, _ := proxykit.NewDialer(proxykit.Spec{Protocol: proxykit.HTTP, Host: "proxy.test", Port: 80, Username: "", Password: ""}, proxykit.DialOptions{Advanced: proxykit.AdvancedDialOptions{Forward: forward}})
 	r, e := relay.Start(d, relay.Options{})
 	if e != nil {
 		t.Fatal(e)
@@ -142,10 +142,10 @@ func TestRelayCloseCancelsPendingHandshake(t *testing.T) {
 
 func TestRelayRejectsUnsupportedRequestAndLimitsHeaders(t *testing.T) {
 	var calls atomic.Int32
-	d, _ := proxykit.NewDialer(proxykit.Spec{Protocol: proxykit.HTTP, Host: "proxy.test", Port: 80, Username: "", Password: ""}, proxykit.DialOptions{Forward: func(context.Context, string, string) (net.Conn, error) {
+	d, _ := proxykit.NewDialer(proxykit.Spec{Protocol: proxykit.HTTP, Host: "proxy.test", Port: 80, Username: "", Password: ""}, proxykit.DialOptions{Advanced: proxykit.AdvancedDialOptions{Forward: func(context.Context, string, string) (net.Conn, error) {
 		calls.Add(1)
 		return nil, errors.New("should not dial")
-	}})
+	}}})
 	r, e := relay.Start(d, relay.Options{HeaderTimeout: 30 * time.Millisecond})
 	if e != nil {
 		t.Fatal(e)

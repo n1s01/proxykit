@@ -12,6 +12,8 @@ import (
 // Protocol describes the wire protocol used to reach a proxy.
 type Protocol string
 
+// Supported protocols. Auto means "not known yet": Parse leaves it, Detect
+// and New resolve it, NewDialer rejects it.
 const (
 	Auto   Protocol = "auto"
 	HTTP   Protocol = "http"
@@ -30,8 +32,13 @@ type Spec struct {
 	Password string   `json:"password,omitempty"`
 }
 
+// Address returns host:port of the proxy, with IPv6 in brackets.
 func (s Spec) Address() string { return net.JoinHostPort(s.Host, strconv.Itoa(s.Port)) }
-func (s Spec) HasAuth() bool   { return s.Username != "" || s.Password != "" }
+
+// HasAuth reports whether credentials are set.
+func (s Spec) HasAuth() bool { return s.Username != "" || s.Password != "" }
+
+// String returns protocol://host:port with credentials replaced by REDACTED.
 func (s Spec) String() string {
 	auth := ""
 	if s.HasAuth() {
@@ -39,6 +46,8 @@ func (s Spec) String() string {
 	}
 	return string(s.Protocol) + "://" + auth + s.Address()
 }
+
+// GoString redacts credentials in %#v, like String.
 func (s Spec) GoString() string { return s.String() }
 
 // URL is an explicit credential-bearing export, suitable for clients accepting URLs.

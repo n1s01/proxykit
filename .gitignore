@@ -3,3 +3,4 @@ coverage.out
 .DS_Store
 docs/tele-manager-audit.md
 *.exe
+bypass-report.txt

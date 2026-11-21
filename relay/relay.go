@@ -62,7 +62,7 @@ func Start(d Dialer, opts Options) (*Server, error) {
 	if headerTimeout == 0 {
 		headerTimeout = 5 * time.Second
 	}
-	ln, e := net.Listen("tcp", "127.0.0.1:0")
+	ln, e := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if e != nil {
 		return nil, e
 	}
@@ -105,7 +105,7 @@ func (r *Server) handle(w http.ResponseWriter, req *http.Request) {
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		http.Error(w, "relay closed", 503)
+		http.Error(w, "relay closed", http.StatusServiceUnavailable)
 		return
 	}
 	r.wg.Add(1)
@@ -124,7 +124,7 @@ func (r *Server) handle(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if req.URL.Scheme != "http" || req.URL.Host == "" || req.URL.User != nil || req.Header.Get("Upgrade") != "" {
-		http.Error(w, "expected absolute HTTP URL or CONNECT", 400)
+		http.Error(w, "expected absolute HTTP URL or CONNECT", http.StatusBadRequest)
 		return
 	}
 	host := req.URL.Hostname()
@@ -133,7 +133,7 @@ func (r *Server) handle(w http.ResponseWriter, req *http.Request) {
 		port = "80"
 	}
 	if _, _, e := validateTarget(net.JoinHostPort(host, port)); e != nil {
-		http.Error(w, "invalid target", 400)
+		http.Error(w, "invalid target", http.StatusBadRequest)
 		return
 	}
 	out := req.Clone(req.Context())
@@ -142,7 +142,7 @@ func (r *Server) handle(w http.ResponseWriter, req *http.Request) {
 	stripHopHeaders(out.Header)
 	resp, e := r.transport.RoundTrip(out)
 	if e != nil {
-		http.Error(w, "upstream connection failed", 502)
+		http.Error(w, "upstream connection failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
@@ -158,7 +158,7 @@ func (r *Server) handle(w http.ResponseWriter, req *http.Request) {
 
 func (r *Server) connect(w http.ResponseWriter, req *http.Request) {
 	if _, _, e := validateTarget(req.Host); e != nil {
-		http.Error(w, "invalid CONNECT target", 400)
+		http.Error(w, "invalid CONNECT target", http.StatusBadRequest)
 		return
 	}
 	up, e := r.dialer.DialContext(req.Context(), "tcp", req.Host)
@@ -166,17 +166,17 @@ func (r *Server) connect(w http.ResponseWriter, req *http.Request) {
 		if up != nil {
 			_ = up.Close()
 		}
-		http.Error(w, "upstream connection failed", 502)
+		http.Error(w, "upstream connection failed", http.StatusBadGateway)
 		return
 	}
 	if up == nil {
-		http.Error(w, "upstream connection failed", 502)
+		http.Error(w, "upstream connection failed", http.StatusBadGateway)
 		return
 	}
 	defer up.Close()
 	hj, ok := w.(http.Hijacker)
 	if !ok {
-		http.Error(w, "CONNECT unavailable", 500)
+		http.Error(w, "CONNECT unavailable", http.StatusInternalServerError)
 		return
 	}
 	client, rw, e := hj.Hijack()

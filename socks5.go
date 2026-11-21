@@ -12,9 +12,9 @@ func (s socksConnector) Connect(conn net.Conn, target targetInfo) (net.Conn, Sta
 	return conn, stage, code, err
 }
 
-func (d socksConnector) socksConnect(c net.Conn, host string, port int) (Stage, int, error) {
+func (s socksConnector) socksConnect(c net.Conn, host string, port int) (Stage, int, error) {
 	methods := []byte{0}
-	if d.spec.HasAuth() {
+	if s.spec.HasAuth() {
 		methods = append(methods, 2)
 	}
 	if e := writeAll(c, append([]byte{5, byte(len(methods))}, methods...)); e != nil {
@@ -30,12 +30,12 @@ func (d socksConnector) socksConnect(c net.Conn, host string, port int) (Stage, 
 	switch reply[1] {
 	case 0:
 	case 2:
-		if !d.spec.HasAuth() {
+		if !s.spec.HasAuth() {
 			return StageAuth, 0, ErrAuth
 		}
-		auth := append([]byte{1, byte(len(d.spec.Username))}, []byte(d.spec.Username)...)
-		auth = append(auth, byte(len(d.spec.Password)))
-		auth = append(auth, []byte(d.spec.Password)...)
+		auth := append([]byte{1, byte(len(s.spec.Username))}, []byte(s.spec.Username)...)
+		auth = append(auth, byte(len(s.spec.Password)))
+		auth = append(auth, []byte(s.spec.Password)...)
 		if e := writeAll(c, auth); e != nil {
 			return StageAuth, 0, e
 		}

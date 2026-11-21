@@ -35,6 +35,7 @@ func httpConnect(c net.Conn, s Spec, target string) (net.Conn, int, error) {
 	// response bodies must not be closed/read on success: those bytes are the tunnel.
 	lr := &io.LimitedReader{R: c, N: 64 << 10}
 	br := bufio.NewReader(lr)
+	//nolint:bodyclose // a CONNECT response has no body: what follows is the tunnel, returned to the caller
 	resp, e := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
 	if e != nil {
 		return c, 0, e
@@ -44,7 +45,7 @@ func httpConnect(c net.Conn, s Spec, target string) (net.Conn, int, error) {
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		e = ErrRejected
-		if resp.StatusCode == 407 {
+		if resp.StatusCode == http.StatusProxyAuthRequired {
 			e = ErrAuth
 		}
 		return c, resp.StatusCode, e

@@ -14,6 +14,8 @@ import (
 // assigns all four fields explicitly.
 type Layout string
 
+// Predefined layouts. LayoutAuto accepts the conventional short forms and
+// rejects ambiguous ones; any other Layout string is also valid.
 const (
 	LayoutAuto       Layout = ""
 	HostPortUserPass Layout = "host:port:user:pass"

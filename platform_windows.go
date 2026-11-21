@@ -1,5 +1,7 @@
 //go:build windows
 
+// Platform backend for Windows. Contract: platformBackend in platform.go.
+
 package proxykit
 
 import (
@@ -10,10 +12,36 @@ import (
 	"unsafe"
 )
 
-const bindSupported = true
+var backend platformBackend = windowsBackend{}
 
-// IP_UNICAST_IF and IPV6_UNICAST_IF share the option number.
+type windowsBackend struct{}
+
+func (windowsBackend) info() Platform {
+	return Platform{
+		OS:           "windows",
+		Bypass:       true,
+		SocketOption: "IP_UNICAST_IF / IPV6_UNICAST_IF",
+		RouteTable:   "GetIpForwardTable",
+		Notes: []string{
+			"adapter names are free-form; tunnels are recognized by missing MAC/broadcast and by name",
+			"hypervisor host-only adapters look physical; the default-route ranking skips them",
+		},
+	}
+}
+
+// unicastIF is the value of both IP_UNICAST_IF and IPV6_UNICAST_IF.
 const unicastIF = 31
+
+func (windowsBackend) bind(fd uintptr, ipv6 bool, iface *net.Interface) error {
+	if ipv6 {
+		return syscall.SetsockoptInt(syscall.Handle(fd), syscall.IPPROTO_IPV6, unicastIF, iface.Index)
+	}
+	// IPv4 expects the interface index in network byte order.
+	index := bits.ReverseBytes32(uint32(iface.Index))
+	return syscall.SetsockoptInt(syscall.Handle(fd), syscall.IPPROTO_IP, unicastIF, int(int32(index)))
+}
+
+func (windowsBackend) physicalName(name string) bool { return !virtualName(name) }
 
 var procGetIPForwardTable = syscall.NewLazyDLL("iphlpapi.dll").NewProc("GetIpForwardTable")
 
@@ -24,12 +52,9 @@ type ipForwardRow struct {
 	Metric1, Metric2, Metric3, Metric4, Metric5 uint32
 }
 
-func physicalName(name string) bool { return !virtualName(name) }
-
-// defaultRouteInterfaces lists the indexes of interfaces that own an IPv4
-// default route, best metric first. A VPN adds its own routes but leaves the
-// default route of the physical adapter in place.
-func defaultRouteInterfaces() []int {
+// defaultRoutes lists interfaces owning an IPv4 default route, best metric
+// first. A VPN adds its own routes but leaves the physical default in place.
+func (windowsBackend) defaultRoutes() []int {
 	if procGetIPForwardTable.Find() != nil {
 		return nil
 	}
@@ -69,13 +94,4 @@ func defaultRouteInterfaces() []int {
 		indexes = append(indexes, int(row.IfIndex))
 	}
 	return indexes
-}
-
-func bindSocket(fd uintptr, ipv6 bool, iface *net.Interface) error {
-	if ipv6 {
-		return syscall.SetsockoptInt(syscall.Handle(fd), syscall.IPPROTO_IPV6, unicastIF, iface.Index)
-	}
-	// IPv4 expects the interface index in network byte order.
-	index := bits.ReverseBytes32(uint32(iface.Index))
-	return syscall.SetsockoptInt(syscall.Handle(fd), syscall.IPPROTO_IP, unicastIF, int(int32(index)))
 }

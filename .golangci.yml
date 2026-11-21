@@ -1,0 +1,105 @@
+# golangci-lint v2. Run: make lint (or make check before finishing any change).
+#
+# Every custom message below is written as a hint: it says WHERE the code
+# belongs, so a contributor (human or agent) can fix it without guessing.
+# Rationale for the rules: AGENTS.md, section "Инварианты".
+version: "2"
+
+run:
+  tests: true
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose
+    - copyloopvar
+    - depguard
+    - errorlint
+    - forbidigo
+    - gocritic
+    - misspell
+    - noctx
+    - nolintlint
+    - revive
+    - unconvert
+    - usestdlibvars
+
+  settings:
+    depguard:
+      rules:
+        stdlib-only:
+          list-mode: strict
+          allow:
+            - $gostd
+            - github.com/n1s01/proxykit
+          deny:
+            - pkg: golang.org/x
+              desc: "proxykit has zero dependencies (AGENTS.md, invariant 7); use the standard library"
+
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^runtime\.GOOS$
+          msg: "OS differences belong in platform_<os>.go behind build tags (AGENTS.md, invariant 4); call backend.* instead"
+        - pattern: ^syscall\.(SetsockoptInt|BindToDevice|RouteRIB)$
+          msg: "socket/route syscalls are platform code: implement them in platform_<os>.go as a platformBackend method"
+        - pattern: ^http\.(Get|Head|Post|PostForm)$
+          msg: "use http.NewRequestWithContext with an explicit client; proxykit never uses the environment proxy"
+        - pattern: ^http\.DefaultClient$
+          msg: "http.DefaultClient reads HTTP_PROXY; build a client on Dialer.Transport()"
+
+    gocritic:
+      enabled-tags: [diagnostic, performance]
+      disabled-checks:
+        - hugeParam      # Spec and option structs are passed by value on purpose
+        - sloppyReassign # `if err = f(); err != nil` on an outer err is the house style
+
+    staticcheck:
+      checks: ["all", "-ST1000", "-ST1003", "-ST1016", "-ST1020", "-ST1021", "-ST1022", "-QF1001"]
+
+    misspell:
+      locale: US
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+    revive:
+      rules:
+        - name: exported # every exported symbol documents its contract
+          arguments: [disableStutteringCheck]
+        - name: package-comments
+        - name: context-as-argument
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: var-declaration
+
+  exclusions:
+    generated: strict
+    presets:
+      - std-error-handling
+    rules:
+      # Platform files are the one place allowed to talk to the OS directly.
+      - path: ^platform(_[a-z]+)?\.go$
+        linters: [forbidigo]
+      # Examples are standalone programs, not library code.
+      - path: ^examples/
+        linters: [forbidigo, revive]
+      - path: _test\.go$
+        linters: [forbidigo, noctx, bodyclose, revive, usestdlibvars]
+      # syscall routing-socket API is deprecated in favor of x/net/route, which
+      # would be the module's only dependency.
+      - path: ^platform_darwin\.go$
+        linters: [staticcheck]
+        text: "SA1019"
+
+formatters:
+  enable:
+    - gofmt

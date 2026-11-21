@@ -49,7 +49,7 @@ func TestCheckHTTPStatusRedirectAndTargetTLS(t *testing.T) {
 		case "/ok":
 			w.WriteHeader(204)
 		case "/redirect":
-			http.Redirect(w, r, "/followed", 302)
+			http.Redirect(w, r, "/followed", http.StatusFound)
 		case "/followed":
 			redirected.Add(1)
 		default:
@@ -178,10 +178,10 @@ func TestDetectionCancelsAndClosesLosingAttempts(t *testing.T) {
 
 func TestResolveExplicitDoesNotProbe(t *testing.T) {
 	var calls atomic.Int32
-	opts := proxykit.DetectOptions{DialOptions: proxykit.DialOptions{Forward: func(context.Context, string, string) (net.Conn, error) {
+	opts := proxykit.DetectOptions{DialOptions: proxykit.DialOptions{Advanced: proxykit.AdvancedDialOptions{Forward: func(context.Context, string, string) (net.Conn, error) {
 		calls.Add(1)
 		return nil, errors.New("unexpected dial")
-	}}}
+	}}}}
 	s, e := proxykit.Resolve(context.Background(), "https://host.test:443", proxykit.ParseOptions{}, opts)
 	if e != nil || s.Protocol != proxykit.HTTPS || calls.Load() != 0 {
 		t.Fatal("explicit protocol was probed/overridden")
@@ -212,7 +212,7 @@ func TestBatchBoundsConcurrencyAndPreservesOrder(t *testing.T) {
 	}
 	results, e := proxykit.CheckAll(context.Background(), specs, proxykit.BatchOptions{
 		Check: proxykit.CheckOptions{Target: "target.test:443"},
-		Dial:  proxykit.DialOptions{Forward: forward}, Concurrency: 3,
+		Dial:  proxykit.DialOptions{Advanced: proxykit.AdvancedDialOptions{Forward: forward}}, Concurrency: 3,
 	})
 	if e != nil || len(results) != len(specs) || maxSeen.Load() > 3 || maxSeen.Load() < 2 {
 		t.Fatalf("concurrency: %d %v", maxSeen.Load(), e)
@@ -242,13 +242,13 @@ func TestDialerResolvesAutoWithItsConfiguredRoute(t *testing.T) {
 	spec, _ := connectProxy(t, false, "u", "p", &hits)
 	target := echoTarget(t)
 	client, err := proxykit.New(context.Background(), spec.Address()+":u:p", proxykit.Options{
-		Dial: proxykit.DialOptions{Forward: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		Dial: proxykit.DialOptions{Advanced: proxykit.AdvancedDialOptions{Forward: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			forwarded.Add(1)
 			if addr != spec.Address() {
 				t.Errorf("discovery route changed to %s", addr)
 			}
 			return (&net.Dialer{}).DialContext(ctx, network, addr)
-		}},
+		}}},
 		Target: target, Candidates: []proxykit.Protocol{proxykit.HTTP},
 	})
 	if err != nil || client.Spec().Protocol != proxykit.HTTP {

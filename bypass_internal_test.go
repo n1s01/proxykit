@@ -40,8 +40,8 @@ func TestDialFirstSkipsDeadAddress(t *testing.T) {
 }
 
 func TestPreferRouted(t *testing.T) {
-	// The adapter order of the machine this was reported on: a VirtualBox
-	// host-only adapter is listed before the one that reaches the internet.
+	// A VirtualBox host-only adapter is listed before the one that reaches
+	// the internet, as on the Windows machine this was reported on.
 	hostOnly, ethernet, wifi := &net.Interface{Index: 12}, &net.Interface{Index: 11}, &net.Interface{Index: 7}
 	candidates := []*net.Interface{hostOnly, ethernet, wifi}
 	for _, tc := range []struct {
@@ -57,6 +57,28 @@ func TestPreferRouted(t *testing.T) {
 	} {
 		if got := preferRouted(candidates, tc.routed); got != tc.want {
 			t.Errorf("%s: picked #%d, want #%d", tc.name, got.Index, tc.want.Index)
+		}
+	}
+}
+
+func TestIsLocalhost(t *testing.T) {
+	for host, want := range map[string]bool{
+		"localhost": true, "LOCALHOST.": true, "app.localhost": true,
+		"localhost.example": false, "example.com": false,
+	} {
+		if isLocalhost(host) != want {
+			t.Errorf("isLocalhost(%q) != %v", host, want)
+		}
+	}
+}
+
+func TestVirtualName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"utun3": true, "wg0": true, "Cloudflare WARP": true, "vEthernet (WSL)": true,
+		"tailscale0": true, "docker0": true, "eth0": false, "Wi-Fi": false, "enp3s0": false,
+	} {
+		if virtualName(name) != want {
+			t.Errorf("virtualName(%q) != %v", name, want)
 		}
 	}
 }

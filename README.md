@@ -82,13 +82,16 @@ proxykit/
 ├── check.go, detect.go, batch.go # проверки и определение протокола
 ├── speed.go                      # здоровье и скорость скачивания через прокси
 ├── inspect.go                   # протокол, задержка и страна одним вызовом
-├── bind.go, bind_*.go            # обход VPN: привязка к физическому интерфейсу
+├── route.go                     # DialOptions → маршрут до прокси (bypass по умолчанию)
+├── bypass.go                    # обход VPN: выбор интерфейса, DNS, перебор адресов
+├── platform.go, platform_*.go    # ВСЯ разница между ОС, контракт platformBackend
 ├── *_test.go                    # unit, external API, сетевые тесты, fuzz
 ├── relay/                       # отдельный браузерный адаптер
 ├── gateway/                     # параметры ротационных прокси в логине
-├── examples/{tcp,http,speed,browser}/ # компилируемые примеры
+├── examples/{tcp,http,speed,browser,bypass}/ # компилируемые примеры
 ├── docs/                        # архитектура, аудит, результаты проверок
-├── Makefile
+├── AGENTS.md, CLAUDE.md          # карта модуля для ИИ-агентов
+├── .golangci.yml, Makefile      # линтер с правилами-подсказками, make check
 └── .github/workflows/test.yml
 ```
 
@@ -303,55 +306,71 @@ SOCKS4, UDP ASSOCIATE, BIND, Digest, NTLM, HTTP/2 CONNECT и цепочки пр
 
 ## Сетевой маршрут и TLS
 
+> **Обход VPN включён по умолчанию.** `DialOptions{}` (и любые функции, которые
+> создают диалер сами: `Check`, `SpeedTest`, `Inspect`, `Detect`, `CheckAll`)
+> подключаются к прокси мимо VPN/WARP/TUN. Выключить можно только явно, через
+> `DialOptions.Advanced`.
+
+| Настройка | Маршрут до прокси | `Dialer.Route()` |
+|---|---|---|
+| `DialOptions{}` | физический интерфейс, мимо VPN | `RouteBypass` |
+| `DialOptions{Bypass: proxykit.BypassOptions{Interface: "en0"}}` | то же, с ручным интерфейсом/DNS | `RouteBypass` |
+| `DialOptions{Advanced: proxykit.AdvancedDialOptions{DisableBypass: true}}` | таблица маршрутов ОС (через VPN) | `RouteSystem` |
+| `DialOptions{Advanced: proxykit.AdvancedDialOptions{Forward: f}}` | ваш `f` целиком | `RouteCustom` |
+
+`BypassOptions` вместе с `Advanced.DisableBypass` или `Advanced.Forward` дают
+`ErrInvalid`: ни одна настройка не перекрывает другую молча.
+
 ```go
 d, err := proxykit.NewDialer(p, proxykit.DialOptions{
-    Forward: customNetDialer.DialContext,
-    Timeout: 8*time.Second,
+    Timeout:   8 * time.Second,
     TLSConfig: proxyTLSConfig,
+    Advanced:  proxykit.AdvancedDialOptions{Forward: customNetDialer.DialContext},
 })
 ```
 
-`Forward` открывает только TCP-соединение с прокси и обязан соблюдать контекст.
-Так можно подключить собственный DNS, трассировку или тестовый транспорт.
-По умолчанию используется обычный маршрут ОС. Для SOCKS5 имя цели разрешается
-прокси; имя самого прокси разрешает `Forward`.
+`Advanced.Forward` открывает только TCP-соединение с прокси и обязан соблюдать
+контекст: собственный DNS, трассировка, тестовый транспорт. Для SOCKS5 имя цели
+разрешает прокси; имя самого прокси разрешает выбранный маршрут.
 
-### Обход VPN и WARP
+### Как работает обход VPN
 
-```go
-d, err := proxykit.NewDialer(p, proxykit.DialOptions{
-    Bypass: &proxykit.BypassOptions{},
-})
-```
-
-`Bypass` привязывает соединение с прокси к физическому интерфейсу (Wi-Fi или
-Ethernet), минуя туннели VPN/WARP (TUN). Тем же маршрутом идут `Check`, `Detect`,
-`Inspect`, `Transport` и relay: настройка задаётся один раз в `DialOptions`.
+Сокет до прокси привязывается к физическому интерфейсу (Wi-Fi или Ethernet).
+Тем же маршрутом идут `Check`, `Detect`, `Inspect`, `SpeedTest`, `Transport` и relay.
 
 - Запасного пути через туннель нет: без физического интерфейса подключение
   завершается `ErrNoInterface`.
 - Имя прокси разрешается через публичные DNS по тому же интерфейсу: системный
   DNS при включённом VPN может отдавать адреса туннеля (fake-ip). Список
   меняется в `BypassOptions.DNS`, по умолчанию 1.1.1.1, 8.8.8.8, 77.88.8.8.
+  Имена, известные только локальному/корпоративному DNS, так не разрешатся:
+  укажите IP или выключите обход. `localhost` подключается без привязки.
 - VPN-клиенты в режиме strict route (sing-box, xray, Clash) блокируют порт 53
   мимо туннеля. Если обычный DNS молчит, те же серверы опрашиваются по
   DNS over TLS (порт 853); сработавший способ запоминается.
-- Если у хоста несколько адресов, они пробуются параллельно со сдвигом 250 мс:
-  недоступный адрес не съедает таймаут.
+- Если у хоста несколько адресов, они пробуются параллельно со сдвигом 250 мс.
 - Интерфейс выбирается при каждом подключении. `BypassOptions.Interface`
-  закрепляет его по имени.
-- Loopback-прокси не привязываются. `Forward` и `Bypass` вместе — ошибка.
-- macOS: `IP_BOUND_IF`, интерфейсы `en*`. Linux: `SO_BINDTODEVICE`. Windows:
-  `IP_UNICAST_IF`. Туннели отсеиваются по отсутствию MAC-адреса и флага
-  broadcast (TUN работает на уровне IP), TAP и виртуальные коммутаторы — по
-  имени; при нестандартном имени задайте `Interface`. На Windows из оставшихся
-  берётся интерфейс с лучшим маршрутом по умолчанию: host-only адаптеры
-  VirtualBox и внутренние коммутаторы Hyper-V его не имеют. На остальных системах
-  `NewDialer` возвращает `ErrBypassUnsupported`; см. `BypassSupported()`.
-- Проверить обход на своей машине: `go run ./examples/bypass` при включённом
-  VPN. Утилита показывает адрес обычного маршрута и маршрута обхода.
-- Для соединений, не связанных с прокси, тот же привязанный диалер отдаёт
-  `BypassDialContext`.
+  закрепляет его по имени. Loopback-прокси не привязываются.
+- Туннели отсеиваются по отсутствию MAC-адреса и флага broadcast (TUN работает
+  на уровне IP), TAP и виртуальные коммутаторы — по имени. Из оставшихся
+  берётся интерфейс с маршрутом по умолчанию из таблицы маршрутов ОС.
+- Проверить на своей машине: `go run ./examples/bypass` при включённом VPN.
+- Для соединений, не связанных с прокси, тот же диалер отдаёт `BypassDialContext`.
+
+### Платформы
+
+Вся разница между ОС — в файлах `platform_<os>.go` (контракт в `platform.go`).
+Что собрано в текущий бинарник, возвращает `proxykit.CurrentPlatform()`.
+
+| GOOS | Обход | Привязка сокета | Ранжирование интерфейсов | Особенности |
+|---|---|---|---|---|
+| `darwin`, `ios` | да | `IP_BOUND_IF` / `IPV6_BOUND_IF` | `sysctl NET_RT_DUMP` | физические — `en*`, туннели — `utun*` |
+| `linux`, `android` | да | `SO_BINDTODEVICE` | `/proc/net/route` | нужен Linux 5.7+ или `CAP_NET_RAW`, иначе `EPERM` |
+| `windows` | да | `IP_UNICAST_IF` | `GetIpForwardTable` | host-only адаптеры VirtualBox/Hyper-V отсеиваются по маршруту |
+| остальные (`freebsd`, `openbsd`, `js/wasm`, …) | нет | — | — | `NewDialer` возвращает `ErrBypassUnsupported`, пока не задан `Advanced.DisableBypass` |
+
+На неподдерживаемой ОС библиотека не переходит молча на маршрут через VPN:
+это решение принимает вызывающий код.
 
 `DialOptions.TLSConfig` относится к **HTTPS-прокси**.
 `CheckOptions.TLSConfig` и `Transport.TLSClientConfig`
@@ -363,14 +382,14 @@ Ethernet), минуя туннели VPN/WARP (TUN). Тем же маршрут�
 ## Проверки и ошибки
 
 `d.Check(ctx, opts)` проверяет через уже настроенный диалер. Самостоятельная
-`Check(ctx, spec, opts)` использует стандартные параметры подключения. Если нужны
+`Check(ctx, spec, opts)` использует `DialOptions{}` (обход VPN включён). Если нужны
 собственный маршрут или CA HTTPS-прокси, используйте `NewDialer` и его `Check`.
 Для массовых проверок задавайте их в `BatchOptions.Dial`:
 
 ```go
 outcomes, err := proxykit.CheckAll(ctx, specs, proxykit.BatchOptions{
     Check: proxykit.CheckOptions{Target: "target.example:443"},
-    Dial: proxykit.DialOptions{Forward: customNetDialer.DialContext},
+    Dial: proxykit.DialOptions{Advanced: proxykit.AdvancedDialOptions{Forward: customNetDialer.DialContext}},
     Concurrency: 16,
 })
 ```
@@ -411,7 +430,7 @@ result, err := proxykit.SpeedTest(ctx, spec, proxykit.SpeedTestOptions{
   `Timeout`; скорость посчитана по уже прочитанным байтам.
 - Редиректы не выполняются, `StatusCodes` задаёт допустимые ответы.
 - Сжатие отключено, поэтому считаются байты, реально прошедшие через прокси.
-- Для собственного маршрута, TLS к HTTPS-прокси или обхода VPN используйте
+- Для другого маршрута или TLS к HTTPS-прокси используйте
   `NewDialer(...).SpeedTest(ctx, opts)`.
 - Health-проверка без скачивания тела остаётся в `Check`.
 
@@ -428,7 +447,6 @@ go run ./examples/speed
 ```go
 info, err := proxykit.Inspect(ctx, spec, proxykit.InspectOptions{
     Target: "web.telegram.org:443", // свой хост для замера
-    Dial:   proxykit.DialOptions{Bypass: &proxykit.BypassOptions{}},
 })
 // info.Proxy.Protocol, info.Latency, info.Country, info.IP
 ```
@@ -467,7 +485,7 @@ fail-open/fail-closed принадлежат приложению.
 `Spec.URL()`, JSON `Spec` и JSON `CheckResult` содержат credentials намеренно:
 это конфигурация, а не готовый публичный API DTO. Для UI создавайте отдельный
 DTO без пароля. `errors.Unwrap` раскрывает исходную ошибку, а пользовательский
-`Forward` может включать чувствительные данные в неё — не логируйте её вслепую.
+`Advanced.Forward` может включать чувствительные данные в неё — не логируйте её вслепую.
 
 ## Браузерный relay
 

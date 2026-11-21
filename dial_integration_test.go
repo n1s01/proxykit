@@ -326,13 +326,13 @@ func TestHTTPSCertificateVerification(t *testing.T) {
 func TestForwardValidationNoDirectFallback(t *testing.T) {
 	var calls atomic.Int32
 	cause := errors.New("injected failure")
-	d, e := proxykit.NewDialer(proxykit.Spec{Protocol: proxykit.HTTP, Host: "proxy.test", Port: 80, Username: "", Password: ""}, proxykit.DialOptions{Forward: func(ctx context.Context, network, addr string) (net.Conn, error) {
+	d, e := proxykit.NewDialer(proxykit.Spec{Protocol: proxykit.HTTP, Host: "proxy.test", Port: 80, Username: "", Password: ""}, proxykit.DialOptions{Advanced: proxykit.AdvancedDialOptions{Forward: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		calls.Add(1)
 		if addr != "proxy.test:80" {
 			t.Error("dialed target directly")
 		}
 		return nil, cause
-	}})
+	}}})
 	if e != nil {
 		t.Fatal(e)
 	}

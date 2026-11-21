@@ -1,6 +1,7 @@
 package proxykit
 
 import (
+	"bytes"
 	"net"
 	"strings"
 )
@@ -161,7 +162,7 @@ func parseFields(raw string, protocol Protocol, layout fieldLayout) (Spec, error
 	if err != nil {
 		return Spec{}, err
 	}
-	if len(values) != len(layout.fields) || string(separators) != string(layout.separators) {
+	if len(values) != len(layout.fields) || !bytes.Equal(separators, layout.separators) {
 		return Spec{}, invalid("input does not match layout")
 	}
 	return fieldSpec(values, layout.fields, protocol)

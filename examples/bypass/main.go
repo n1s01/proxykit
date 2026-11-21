@@ -31,12 +31,15 @@ func main() {
 	iface := flag.String("iface", "", "pin a network interface by name")
 	target := flag.String("target", "web.telegram.org:443", "host:port for the proxy check")
 	flag.Parse()
-	if f, err := os.Create("bypass-report.txt"); err == nil {
-		defer f.Close()
+	f, err := os.Create("bypass-report.txt")
+	if err == nil {
 		out = io.MultiWriter(os.Stdout, f)
 	}
 	ok := run(*iface, *target, flag.Arg(0))
 	fmt.Fprintln(out, "\nReport saved to bypass-report.txt. Press Enter to exit.")
+	if f != nil {
+		_ = f.Close()
+	}
 	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 	if !ok {
 		os.Exit(1)
@@ -44,7 +47,12 @@ func main() {
 }
 
 func run(iface, target, proxy string) bool {
-	fmt.Fprintf(out, "proxykit bypass check: %s/%s, supported=%v\n\n", runtime.GOOS, runtime.GOARCH, proxykit.BypassSupported())
+	platform := proxykit.CurrentPlatform()
+	fmt.Fprintf(out, "proxykit bypass check: %s/%s, supported=%v, socket=%q, routes=%q\n", runtime.GOOS, runtime.GOARCH, platform.Bypass, platform.SocketOption, platform.RouteTable)
+	for _, note := range platform.Notes {
+		fmt.Fprintf(out, "  note: %s\n", note)
+	}
+	fmt.Fprintln(out)
 	listInterfaces()
 
 	opts := proxykit.BypassOptions{Interface: iface}
@@ -86,7 +94,7 @@ func run(iface, target, proxy string) bool {
 			return false
 		}
 		info, err := proxykit.Inspect(ctx, spec, proxykit.InspectOptions{
-			Target: target, Dial: proxykit.DialOptions{Bypass: &opts},
+			Target: target, Dial: proxykit.DialOptions{Bypass: opts}, // bypass is the default; opts only pins -iface
 		})
 		if err != nil {
 			fmt.Fprintf(out, "    FAIL: %v (%v)\n", err, unwrapAll(err))

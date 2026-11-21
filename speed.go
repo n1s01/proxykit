@@ -51,8 +51,8 @@ type SpeedTestResult struct {
 }
 
 // SpeedTest checks one proxy and measures download throughput from URL through
-// it. It uses the default connection settings; construct a Dialer for custom
-// routing, proxy TLS or VPN bypass, then call its SpeedTest method.
+// it. It uses zero DialOptions (VPN bypass on); construct a Dialer for another
+// route or proxy TLS, then call its SpeedTest method.
 func SpeedTest(ctx context.Context, spec Spec, opts SpeedTestOptions) (SpeedTestResult, error) {
 	d, err := NewDialer(spec, DialOptions{})
 	if err != nil {

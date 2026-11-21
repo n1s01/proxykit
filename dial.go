@@ -7,11 +7,13 @@ import (
 	"time"
 )
 
-// Dialer is safe for concurrent use. Its configuration is copied at construction.
-// Construct it with New or NewDialer; its zero value cannot open a tunnel.
+// Dialer opens TCP tunnels through one proxy. It is safe for concurrent use,
+// owns no open resources (no Close) and copies its configuration at
+// construction. Build it with New or NewDialer; the zero value cannot dial.
 type Dialer struct {
 	spec      Spec
 	timeout   time.Duration
+	route     Route
 	forward   DialContextFunc
 	tlsConfig *tls.Config
 	connector connector
@@ -20,7 +22,13 @@ type Dialer struct {
 // Spec returns a copy of the resolved endpoint, including credentials.
 func (d *Dialer) Spec() Spec { return d.spec }
 
-// NewDialer validates and snapshots a resolved proxy configuration.
+// Route reports how this Dialer reaches its proxy: RouteBypass unless
+// DialOptions.Advanced overrode it.
+func (d *Dialer) Route() Route { return d.route }
+
+// NewDialer validates and snapshots a resolved proxy configuration. The
+// protocol must be concrete (not Auto). With zero DialOptions the connection
+// to the proxy uses VPN bypass; see route.go.
 func NewDialer(s Spec, opts DialOptions) (*Dialer, error) {
 	if err := s.Validate(); err != nil {
 		return nil, err
@@ -36,17 +44,9 @@ func NewDialer(s Spec, opts DialOptions) (*Dialer, error) {
 	if timeout == 0 {
 		timeout = 10 * time.Second
 	}
-	forward := opts.Forward
-	if opts.Bypass != nil {
-		if forward != nil {
-			return nil, invalid("Forward and Bypass are mutually exclusive")
-		}
-		if forward, err = newBypassForward(*opts.Bypass); err != nil {
-			return nil, err
-		}
-	}
-	if forward == nil {
-		forward = (&net.Dialer{KeepAlive: 30 * time.Second}).DialContext
+	forward, route, err := buildRoute(opts)
+	if err != nil {
+		return nil, err
 	}
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if opts.TLSConfig != nil {
@@ -60,6 +60,7 @@ func NewDialer(s Spec, opts DialOptions) (*Dialer, error) {
 	return &Dialer{
 		spec:      s,
 		timeout:   timeout,
+		route:     route,
 		forward:   forward,
 		tlsConfig: cfg,
 		connector: handshake,
@@ -148,25 +149,6 @@ func (d *Dialer) DialContext(parent context.Context, network, target string) (ne
 		return fail(StageConnect, 0, e)
 	}
 	return c, nil
-}
-
-// DialContextFunc establishes a TCP connection and must honor cancellation.
-type DialContextFunc func(context.Context, string, string) (net.Conn, error)
-
-// DialOptions controls proxy connection setup and proxy-side TLS.
-type DialOptions struct {
-	// Timeout bounds the entire connection setup, including authentication.
-	// Zero uses 10 seconds. Returned tunnels have no library-imposed deadline.
-	Timeout time.Duration
-	// Forward opens only the connection to the proxy. It must honor cancellation.
-	// Inject interface binding, DNS policy, tracing or test transports here.
-	Forward DialContextFunc
-	// Bypass sends the connection to the proxy through a physical interface,
-	// around VPN/WARP tunnels. It replaces Forward; setting both is an error.
-	Bypass *BypassOptions
-	// TLSConfig configures TLS to HTTPS proxies, not TLS to the target.
-	// It is cloned. Normal certificate verification is enabled by default.
-	TLSConfig *tls.Config
 }
 
 // connector owns only the wire handshake. Dialer owns socket setup, TLS,
