@@ -1,6 +1,7 @@
 //go:build darwin
 
-// Platform backend for macOS and iOS (GOOS=ios implies the darwin tag).
+// Platform backend for macOS. GOOS=ios compiles through the darwin tag but is
+// not a supported target.
 // Contract: platformBackend in platform.go.
 
 package proxykit

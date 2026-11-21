@@ -5,7 +5,8 @@ import (
 	"strings"
 )
 
-// ParseJSON accepts a string, Spec object or Telethon-style tuple
+// ParseJSON accepts a string, Spec object (port may be a number or a decimal
+// string) or Telethon-style tuple
 // [protocol, host, port, rdns, username, password]. Explicit local DNS (false)
 // is rejected, since silently changing routing semantics is unsafe.
 // null means no proxy in some applications; here it is an invalid
@@ -25,13 +26,25 @@ func ParseJSON(raw []byte, opts ParseOptions) (Spec, error) {
 		}
 		return ParseWithOptions(s, opts)
 	case '{':
-		var s Spec
+		// Spec's own fields, except that port may also be a decimal string,
+		// as in the tuple form.
+		var obj struct {
+			Protocol Protocol        `json:"protocol"`
+			Host     string          `json:"host"`
+			Port     json.RawMessage `json:"port"`
+			Username string          `json:"username"`
+			Password string          `json:"password"`
+		}
 		dec := json.NewDecoder(strings.NewReader(string(raw)))
 		dec.DisallowUnknownFields()
-		if dec.Decode(&s) != nil || !json.Valid(raw) {
+		if dec.Decode(&obj) != nil || !json.Valid(raw) {
 			return Spec{}, invalid("JSON object")
 		}
-		p, e := ParseProtocol(string(s.Protocol))
+		port, e := jsonPort(obj.Port)
+		if e != nil {
+			return Spec{}, e
+		}
+		p, e := ParseProtocol(string(obj.Protocol))
 		if e != nil {
 			return Spec{}, e
 		}
@@ -41,8 +54,7 @@ func ParseJSON(raw []byte, opts ParseOptions) (Spec, error) {
 				return Spec{}, e
 			}
 		}
-		s.Protocol = p
-		return validated(s)
+		return validated(Spec{Protocol: p, Host: obj.Host, Port: port, Username: obj.Username, Password: obj.Password})
 	case '[':
 		var parts []json.RawMessage
 		if json.Unmarshal(raw, &parts) != nil || len(parts) < 3 || len(parts) > 6 {
@@ -52,17 +64,9 @@ func ParseJSON(raw []byte, opts ParseOptions) (Spec, error) {
 		if json.Unmarshal(parts[0], &p) != nil || json.Unmarshal(parts[1], &h) != nil {
 			return Spec{}, invalid("tuple protocol/host must be strings")
 		}
-		var n int
-		if json.Unmarshal(parts[2], &n) != nil {
-			var ns string
-			if json.Unmarshal(parts[2], &ns) != nil {
-				return Spec{}, invalid("tuple port")
-			}
-			var e error
-			n, e = parsePort(ns)
-			if e != nil {
-				return Spec{}, e
-			}
+		n, e := jsonPort(parts[2])
+		if e != nil {
+			return Spec{}, e
 		}
 		if len(parts) > 3 && string(parts[3]) != "null" {
 			var rdns bool
@@ -90,4 +94,21 @@ func ParseJSON(raw []byte, opts ParseOptions) (Spec, error) {
 	default:
 		return Spec{}, invalid("expected JSON string, object or tuple")
 	}
+}
+
+// jsonPort accepts a port as a JSON number or a decimal string. An absent
+// port is zero and fails validation later with the usual message.
+func jsonPort(raw json.RawMessage) (int, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, nil
+	}
+	var n int
+	if json.Unmarshal(raw, &n) == nil {
+		return n, nil
+	}
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return 0, invalid("port")
+	}
+	return parsePort(s)
 }

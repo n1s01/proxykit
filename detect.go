@@ -156,8 +156,4 @@ func detect(parent context.Context, s Spec, opts DetectOptions, factory dialerFa
 // dialerFactory is an implementation detail for bounded discovery and checks.
 type dialerFactory func(Spec) (ContextDialer, error)
 
-func newDialerFactory(opts DialOptions) dialerFactory {
-	return func(spec Spec) (ContextDialer, error) {
-		return NewDialer(spec, opts)
-	}
-}
+func newDialerFactory(opts DialOptions) dialerFactory { return newSharedRoute(opts).factory() }

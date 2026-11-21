@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -30,6 +31,12 @@ func (d *Dialer) Route() Route { return d.route }
 // protocol must be concrete (not Auto). With zero DialOptions the connection
 // to the proxy uses VPN bypass; see route.go.
 func NewDialer(s Spec, opts DialOptions) (*Dialer, error) {
+	return newDialer(s, opts, func() (DialContextFunc, Route, error) { return buildRoute(opts) })
+}
+
+// newDialer validates s and opts before asking for the route, so a bad spec is
+// reported ahead of route problems whichever way the route is obtained.
+func newDialer(s Spec, opts DialOptions, route func() (DialContextFunc, Route, error)) (*Dialer, error) {
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
@@ -44,13 +51,17 @@ func NewDialer(s Spec, opts DialOptions) (*Dialer, error) {
 	if timeout == 0 {
 		timeout = 10 * time.Second
 	}
-	forward, route, err := buildRoute(opts)
+	forward, kind, err := route()
 	if err != nil {
 		return nil, err
 	}
-	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	var cfg *tls.Config
 	if opts.TLSConfig != nil {
 		cfg = opts.TLSConfig.Clone()
+	} else {
+		// Resumption saves a round trip on every tunnel after the first one
+		// through an HTTPS proxy.
+		cfg = &tls.Config{MinVersion: tls.VersionTLS12, ClientSessionCache: tls.NewLRUClientSessionCache(64)}
 	}
 	if cfg.ServerName == "" {
 		cfg.ServerName = s.Host
@@ -60,11 +71,43 @@ func NewDialer(s Spec, opts DialOptions) (*Dialer, error) {
 	return &Dialer{
 		spec:      s,
 		timeout:   timeout,
-		route:     route,
+		route:     kind,
 		forward:   forward,
 		tlsConfig: cfg,
 		connector: handshake,
 	}, nil
+}
+
+// sharedRoute builds the route of one operation once (lazily, on the first
+// Dialer) and hands it to every Dialer of that operation. With the default
+// bypass this shares the DNS cache, the DoT preference and the interface
+// choice across all proxies of a CheckAll or all candidates of a Detect. It is
+// scoped to the operation, never global.
+type sharedRoute struct {
+	opts    DialOptions
+	once    sync.Once
+	forward DialContextFunc
+	kind    Route
+	err     error
+}
+
+func newSharedRoute(opts DialOptions) *sharedRoute { return &sharedRoute{opts: opts} }
+
+func (r *sharedRoute) get() (DialContextFunc, Route, error) {
+	r.once.Do(func() { r.forward, r.kind, r.err = buildRoute(r.opts) })
+	return r.forward, r.kind, r.err
+}
+
+func (r *sharedRoute) dialer(s Spec) (*Dialer, error) { return newDialer(s, r.opts, r.get) }
+
+func (r *sharedRoute) factory() dialerFactory {
+	return func(s Spec) (ContextDialer, error) {
+		d, err := r.dialer(s)
+		if err != nil {
+			return nil, err // never a typed nil inside the interface
+		}
+		return d, nil
+	}
 }
 
 // DialContext completes authentication and CONNECT before returning a tunnel.
@@ -129,7 +172,8 @@ func (d *Dialer) DialContext(parent context.Context, network, target string) (ne
 		return fail(StageDial, 0, e)
 	}
 	if d.spec.Protocol == HTTPS {
-		tc := tls.Client(c, d.tlsConfig.Clone())
+		// A tls.Config is safe to share once it is no longer modified.
+		tc := tls.Client(c, d.tlsConfig)
 		c = tc
 		if e = tc.HandshakeContext(ctx); e != nil {
 			return fail(StageProxyTLS, 0, e)

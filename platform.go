@@ -13,10 +13,14 @@ package proxykit
 // runtime.GOOS — the linter rejects runtime.GOOS outside platform files.
 //
 //	file                      GOOS                     bypass  socket option            route table
-//	platform_darwin.go        darwin, ios              yes     IP_BOUND_IF/IPV6_BOUND_IF sysctl NET_RT_DUMP
-//	platform_linux.go         linux, android           yes     SO_BINDTODEVICE          /proc/net/route
+//	platform_darwin.go        darwin (ios compiles)    yes     IP_BOUND_IF/IPV6_BOUND_IF sysctl NET_RT_DUMP
+//	platform_linux.go         linux (android compiles) yes     SO_BINDTODEVICE          /proc/net/route
 //	platform_windows.go       windows                  yes     IP_UNICAST_IF            GetIpForwardTable
 //	platform_unsupported.go   everything else          no      -                        -
+//
+// Targets are desktop Windows, macOS and Linux. ios and android build through
+// the darwin/linux tags but are not supported: cellular interfaces (pdp_ip*,
+// rmnet*) have no MAC or broadcast and are never picked.
 //
 // On an unsupported OS the default route (bypass) cannot be built, so
 // NewDialer fails with ErrBypassUnsupported until the caller explicitly sets

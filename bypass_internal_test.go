@@ -82,3 +82,69 @@ func TestVirtualName(t *testing.T) {
 		}
 	}
 }
+
+func TestIPv4First(t *testing.T) {
+	ips := []net.IP{net.ParseIP("2001:db8::1"), net.ParseIP("192.0.2.1"), net.ParseIP("2001:db8::2"), net.ParseIP("192.0.2.2")}
+	got := ipv4First(ips)
+	want := []string{"192.0.2.1", "192.0.2.2", "2001:db8::1", "2001:db8::2"}
+	for i, ip := range got {
+		if ip.String() != want[i] {
+			t.Fatalf("order %v, want %v", got, want)
+		}
+	}
+}
+
+func newTestBypass() *bypass {
+	return &bypass{cache: map[string]dnsEntry{}, inflight: map[string]*dnsCall{}}
+}
+
+func TestLookupServesCacheByFamily(t *testing.T) {
+	b := newTestBypass()
+	cached := []net.IP{net.ParseIP("192.0.2.7")}
+	b.cache["ip4|proxy.example"] = dnsEntry{ips: cached, expires: time.Now().Add(time.Minute)}
+	ips, err := b.lookup(context.Background(), "tcp4", "Proxy.Example.")
+	if err != nil || len(ips) != 1 || !ips[0].Equal(cached[0]) {
+		t.Fatalf("cache miss: %v %v", ips, err)
+	}
+	// Another family is a different entry: it must not be served from ip4.
+	// A pending resolution stands in for the network.
+	b.inflight["ip|proxy.example"] = &dnsCall{done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err = b.lookup(ctx, "tcp", "proxy.example"); err == nil {
+		t.Fatal("ip lookup was served from the ip4 entry")
+	}
+}
+
+func TestLookupSharesInflightResolution(t *testing.T) {
+	b := newTestBypass()
+	call := &dnsCall{done: make(chan struct{})}
+	b.inflight["ip|proxy.example"] = call
+
+	// A caller giving up does not fail the shared resolution.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := b.lookup(ctx, "tcp", "proxy.example"); err == nil {
+		t.Fatal("canceled caller got an answer")
+	}
+
+	results := make(chan []net.IP, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			ips, _ := b.lookup(context.Background(), "tcp", "proxy.example")
+			results <- ips
+		}()
+	}
+	call.ips = []net.IP{net.ParseIP("192.0.2.9")}
+	close(call.done)
+	for i := 0; i < 2; i++ {
+		select {
+		case ips := <-results:
+			if len(ips) != 1 || !ips[0].Equal(call.ips[0]) {
+				t.Fatalf("waiter got %v", ips)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("waiter did not get the shared answer")
+		}
+	}
+}

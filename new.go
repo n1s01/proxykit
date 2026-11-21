@@ -23,15 +23,17 @@ func New(ctx context.Context, input string, opts Options) (*Dialer, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Discovery and the returned Dialer share one route (DNS cache, interface).
+	route := newSharedRoute(opts.Dial)
 	if spec.Protocol == Auto {
-		result, err := Detect(ctx, spec, DetectOptions{
+		result, err := detect(ctx, spec, DetectOptions{
 			Target: opts.Target, Candidates: opts.Candidates,
 			Timeout: opts.Dial.Timeout, DialOptions: opts.Dial,
-		})
+		}, route.factory())
 		if err != nil {
 			return nil, err
 		}
 		spec = result.Proxy
 	}
-	return NewDialer(spec, opts.Dial)
+	return route.dialer(spec)
 }

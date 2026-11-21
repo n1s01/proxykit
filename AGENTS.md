@@ -43,7 +43,8 @@
 | Разбор строк / JSON / списков | `parse.go`, `parse_layout.go`, `parse_json.go`, `parse_lines.go` |
 | Жизненный цикл сокета, таймауты, TLS к прокси | `dial.go` |
 | **Как сокет доходит до прокси** (bypass / system / custom) | `route.go` → `buildRoute` |
-| Логику обхода VPN: выбор интерфейса, DNS, DoT, перебор адресов | `bypass.go` |
+| Логику обхода VPN: выбор интерфейса, DNS, DoT, кэши, перебор адресов | `bypass.go` |
+| Общий маршрут для диалеров одной операции (`sharedRoute`) | `dial.go` |
 | Поведение на конкретной ОС | `platform_darwin.go`, `platform_linux.go`, `platform_windows.go`, `platform_unsupported.go` |
 | Контракт платформ, таблицу ОС | `platform.go` (`platformBackend`, `Platform`) |
 | HTTP CONNECT / SOCKS5 handshake | `http_connect.go`, `socks5.go` |
@@ -57,10 +58,13 @@
 
 | GOOS | Обход | Механизм | Таблица маршрутов |
 |---|---|---|---|
-| darwin, ios | да | `IP_BOUND_IF` / `IPV6_BOUND_IF` | `sysctl NET_RT_DUMP` |
-| linux, android | да | `SO_BINDTODEVICE` (Linux 5.7+ или `CAP_NET_RAW`) | `/proc/net/route` |
+| darwin | да | `IP_BOUND_IF` / `IPV6_BOUND_IF` | `sysctl NET_RT_DUMP` |
+| linux | да | `SO_BINDTODEVICE` (Linux 5.7+ или `CAP_NET_RAW`) | `/proc/net/route` |
 | windows | да | `IP_UNICAST_IF` | `GetIpForwardTable` |
 | всё остальное | нет | — | — |
+
+Цель — настольные Windows/macOS/Linux. `ios` и `android` только собираются
+(build tags `darwin`/`linux`), мобильные сценарии не поддерживаются.
 
 Добавить ОС: создай `platform_<os>.go` с `//go:build <os>` и
 `var backend platformBackend = <os>Backend{}`, сузь build tag в

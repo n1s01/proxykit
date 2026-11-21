@@ -75,25 +75,26 @@ func Inspect(ctx context.Context, spec Spec, opts InspectOptions) (Info, error) 
 		}
 		return d.Inspect(ctx, opts)
 	}
-	found, err := Detect(ctx, spec, DetectOptions{
+	route := newSharedRoute(opts.Dial)
+	found, err := detect(ctx, spec, DetectOptions{
 		Target: opts.Target, Candidates: opts.Candidates,
 		Timeout: opts.Timeout, DialOptions: opts.Dial,
-	})
-	if err == nil {
-		var d *Dialer
-		if d, err = NewDialer(found.Proxy, opts.Dial); err == nil {
-			info.Proxy = found.Proxy
-			// The winning attempt already is one clean tunnel to Target.
-			for _, attempt := range found.Attempts {
-				if attempt.Protocol == found.Proxy.Protocol {
-					info.Latency = attempt.Duration
-				}
-			}
-			err = d.geo(ctx, &info, opts)
-		}
+	}, route.factory())
+	if err != nil {
+		info.Duration = time.Since(started)
+		return info, err
 	}
-	info.Duration = time.Since(started)
-	return info, err
+	d, err := route.dialer(found.Proxy)
+	if err != nil {
+		info.Duration = time.Since(started)
+		return info, err
+	}
+	// Measure latency on a fresh tunnel, as Dialer.Inspect does: discovery
+	// attempts race each other on the same proxy and are not comparable.
+	measured, err := d.Inspect(ctx, opts)
+	measured.StartedAt = info.StartedAt
+	measured.Duration = time.Since(started)
+	return measured, err
 }
 
 // Inspect measures latency and exit country through the configured dialer.

@@ -50,6 +50,11 @@ func httpConnect(c net.Conn, s Spec, target string) (net.Conn, int, error) {
 		}
 		return c, resp.StatusCode, e
 	}
+	if br.Buffered() == 0 {
+		// Nothing read past the headers: hand back the socket itself, so the
+		// tunnel keeps zero-copy paths (splice, sendfile) and CloseWrite.
+		return c, resp.StatusCode, nil
+	}
 	lr.N = math.MaxInt64
 	return &bufferedConn{Conn: c, reader: br}, resp.StatusCode, nil
 }

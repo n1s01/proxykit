@@ -20,10 +20,18 @@ type BatchOptions struct {
 }
 
 // CheckAll checks proxies with a fixed worker pool and preserves input order.
+// All checks share one route, so a proxy host is resolved once per batch. An
+// invalid route configuration (opts.Dial) fails the whole call up front.
 // It returns partial results on cancellation. A failed item has its own Err;
 // the returned error describes cancellation or invalid batch configuration.
 func CheckAll(ctx context.Context, specs []Spec, opts BatchOptions) ([]CheckOutcome, error) {
-	return checkAll(ctx, specs, opts.Check, opts.Concurrency, newDialerFactory(opts.Dial))
+	// One route for the whole batch: each proxy host is resolved once and a
+	// broken route configuration fails here instead of once per item.
+	route := newSharedRoute(opts.Dial)
+	if _, _, err := route.get(); err != nil {
+		return nil, err
+	}
+	return checkAll(ctx, specs, opts.Check, opts.Concurrency, route.factory())
 }
 
 // checkAll uses a fixed worker pool, preserves input order and returns completed

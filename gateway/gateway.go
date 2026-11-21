@@ -129,17 +129,11 @@ func (f Format) New(ctx context.Context, input string, p Params, opts proxykit.O
 	if spec, err = f.Apply(spec, p); err != nil {
 		return nil, err
 	}
-	if spec.Protocol == proxykit.Auto {
-		found, err := proxykit.Detect(ctx, spec, proxykit.DetectOptions{
-			Target: opts.Target, Candidates: opts.Candidates,
-			Timeout: opts.Dial.Timeout, DialOptions: opts.Dial,
-		})
-		if err != nil {
-			return nil, err
-		}
-		spec = found.Proxy
-	}
-	return proxykit.NewDialer(spec, opts.Dial)
+	// The finished endpoint goes back through proxykit.New as a URL, so an
+	// Auto protocol is discovered exactly as there, on one shared route.
+	return proxykit.New(ctx, spec.URL().String(), proxykit.Options{
+		Dial: opts.Dial, Target: opts.Target, Candidates: opts.Candidates,
+	})
 }
 
 func (f Format) settings() (string, time.Duration, error) {
@@ -258,12 +252,20 @@ const sessionAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 // NewSession returns a random ten-character session identifier. It panics
 // only if the system random source fails.
 func NewSession() string {
-	b := make([]byte, 10)
-	if _, err := rand.Read(b); err != nil {
-		panic("gateway: random source: " + err.Error())
+	// Bytes at or above the largest multiple of the alphabet size are
+	// rejected, so every character is equally likely.
+	const limit = 256 - 256%len(sessionAlphabet)
+	out := make([]byte, 0, 10)
+	var buf [16]byte
+	for len(out) < cap(out) {
+		if _, err := rand.Read(buf[:]); err != nil {
+			panic("gateway: random source: " + err.Error())
+		}
+		for _, c := range buf {
+			if int(c) < limit && len(out) < cap(out) {
+				out = append(out, sessionAlphabet[int(c)%len(sessionAlphabet)])
+			}
+		}
 	}
-	for i := range b {
-		b[i] = sessionAlphabet[int(b[i])%len(sessionAlphabet)]
-	}
-	return string(b)
+	return string(out)
 }

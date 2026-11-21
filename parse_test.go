@@ -1,6 +1,7 @@
 package proxykit
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -115,4 +116,38 @@ func FuzzParse(f *testing.F) {
 			t.Fatal("successful parse cannot round trip")
 		}
 	})
+}
+
+func TestParseLinesIgnoresByteOrderMark(t *testing.T) {
+	specs, errs := ParseLines("\ufeffsocks5://127.0.0.1:1080\nhttp://127.0.0.1:8080\n", ParseOptions{})
+	if len(errs) != 0 || len(specs) != 2 || specs[0].Protocol != SOCKS5 {
+		t.Fatalf("specs %v, errors %v", specs, errs)
+	}
+}
+
+func TestJSONObjectPortAsString(t *testing.T) {
+	s, err := ParseJSON([]byte(`{"protocol":"http","host":"proxy.test","port":"8080"}`), ParseOptions{})
+	if err != nil || s.Port != 8080 {
+		t.Fatalf("got %v, %v", s, err)
+	}
+	for _, raw := range []string{
+		`{"protocol":"http","host":"proxy.test","port":"80a"}`,
+		`{"protocol":"http","host":"proxy.test"}`,
+		`{"protocol":"http","host":"proxy.test","port":8080,"extra":1}`,
+	} {
+		if _, err := ParseJSON([]byte(raw), ParseOptions{}); err == nil {
+			t.Errorf("accepted %s", raw)
+		}
+	}
+}
+
+func TestCheckAllRejectsBadRouteUpFront(t *testing.T) {
+	specs := []Spec{{Protocol: HTTP, Host: "127.0.0.1", Port: 8080}}
+	out, err := CheckAll(context.Background(), specs, BatchOptions{
+		Check: CheckOptions{Target: "127.0.0.1:1"},
+		Dial:  DialOptions{Bypass: BypassOptions{DNS: []string{"not-an-ip:53"}}},
+	})
+	if !errors.Is(err, ErrInvalid) || out != nil {
+		t.Fatalf("got %v, %v", out, err)
+	}
 }

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -29,12 +30,13 @@ import (
 type BypassOptions struct {
 	// Interface pins a network interface by name ("en0", "eth0", "Wi-Fi").
 	// Empty selects a running interface with a MAC address, broadcast and a
-	// routable IPv4 address whose name does not look like a tunnel; among
+	// routable IPv4 or IPv6 address whose name does not look like a tunnel; among
 	// those, the one owning the best default route wins (see Platform).
 	Interface string
-	// DNS lists ip:port resolvers queried over the same interface,
-	// round-robin. Nil uses 1.1.1.1, 8.8.8.8 and 77.88.8.8. When plain DNS
-	// gets no answer, the same servers are asked over TLS on port 853.
+	// DNS lists ip:port resolvers queried over the same interface, all at
+	// once. Nil uses 1.1.1.1, 8.8.8.8 and 77.88.8.8. When plain DNS gets no
+	// answer, the same servers are asked over TLS on port 853. Answers are
+	// cached for a minute per Dialer (shared within CheckAll, Detect and New).
 	DNS []string
 }
 
@@ -52,13 +54,52 @@ func BypassDialContext(opts BypassOptions) (DialContextFunc, error) {
 	return b.dial, nil
 }
 
+// Caching: one bypass serves every Dialer of an operation (see sharedRoute in
+// dial.go), so a batch check resolves each proxy host and inspects the network
+// interfaces once instead of per socket.
+const (
+	// dnsCacheTTL keeps resolved proxy addresses. The Go resolver hides record
+	// TTLs; a minute is short enough for rotating DNS and long enough for a batch.
+	dnsCacheTTL = time.Minute
+	// dnsCacheMax bounds the cache; expired entries are pruned past it.
+	dnsCacheMax = 4096
+	// plainDNSBudget bounds the first transport: blocked DNS is silent.
+	plainDNSBudget = 2 * time.Second
+	// resolveTimeout bounds one shared resolution independently of any caller.
+	resolveTimeout = 8 * time.Second
+	// pickTTL reuses the chosen interface: listing interfaces and the routing
+	// table costs several system calls (GetAdaptersAddresses on Windows) and
+	// runs before every connect, DNS sockets included.
+	pickTTL = 2 * time.Second
+)
+
 type bypass struct {
 	iface string
 	dns   []string
-	next  atomic.Uint32
+	// plain holds one resolver per server, queried in parallel.
+	plain  []*net.Resolver
+	secure *net.Resolver
 	// dot remembers that plain DNS was blocked and DNS over TLS answered.
-	dot           atomic.Bool
-	plain, secure *net.Resolver
+	dot atomic.Bool
+
+	pickMu   sync.Mutex
+	picked   *net.Interface
+	pickedAt time.Time
+
+	dnsMu    sync.Mutex
+	cache    map[string]dnsEntry
+	inflight map[string]*dnsCall
+}
+
+type dnsEntry struct {
+	ips     []net.IP
+	expires time.Time
+}
+
+type dnsCall struct {
+	done chan struct{}
+	ips  []net.IP
+	err  error
 }
 
 func newBypass(opts BypassOptions) (*bypass, error) {
@@ -79,8 +120,10 @@ func newBypass(opts BypassOptions) (*bypass, error) {
 			return nil, err
 		}
 	}
-	b := &bypass{iface: opts.Interface, dns: dns}
-	b.plain = &net.Resolver{PreferGo: true, Dial: b.dialDNS}
+	b := &bypass{iface: opts.Interface, dns: dns, cache: map[string]dnsEntry{}, inflight: map[string]*dnsCall{}}
+	for _, server := range dns {
+		b.plain = append(b.plain, &net.Resolver{PreferGo: true, Dial: b.dialDNS(server)})
+	}
 	b.secure = &net.Resolver{PreferGo: true, Dial: b.dialDoT}
 	return b, nil
 }
@@ -157,44 +200,158 @@ func drainConns[T any](results <-chan T, pending int, conn func(T) net.Conn) {
 	}
 }
 
-// lookup resolves over the physical interface. VPN clients in strict-route
-// mode drop plain DNS outside the tunnel, so DNS over TLS is the second try;
-// whichever worked last goes first next time.
+// lookup resolves host over the physical interface, from the cache when
+// possible. Concurrent lookups of one name share a single resolution, which
+// runs on its own deadline so one caller's cancellation does not fail others.
+// "tcp" asks for both families, IPv4 first; tcp4/tcp6 ask for one.
 func (b *bypass) lookup(ctx context.Context, network, host string) ([]net.IP, error) {
-	family := "ip4"
-	if strings.HasSuffix(network, "6") {
+	family := "ip"
+	switch {
+	case strings.HasSuffix(network, "4"):
+		family = "ip4"
+	case strings.HasSuffix(network, "6"):
 		family = "ip6"
 	}
-	resolvers := []*net.Resolver{b.plain, b.secure}
+	key := family + "|" + strings.ToLower(strings.TrimSuffix(host, "."))
+	b.dnsMu.Lock()
+	if e, ok := b.cache[key]; ok && time.Now().Before(e.expires) {
+		b.dnsMu.Unlock()
+		return e.ips, nil
+	}
+	call, ok := b.inflight[key]
+	if !ok {
+		call = &dnsCall{done: make(chan struct{})}
+		b.inflight[key] = call
+		go b.resolveShared(context.WithoutCancel(ctx), key, family, host, call)
+	}
+	b.dnsMu.Unlock()
+	select {
+	case <-call.done:
+		return call.ips, call.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (b *bypass) resolveShared(ctx context.Context, key, family, host string, call *dnsCall) {
+	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
+	defer cancel()
+	call.ips, call.err = b.resolve(ctx, family, host)
+	b.dnsMu.Lock()
+	delete(b.inflight, key)
+	if call.err == nil {
+		now := time.Now()
+		if len(b.cache) >= dnsCacheMax {
+			for k, e := range b.cache {
+				if !now.Before(e.expires) {
+					delete(b.cache, k)
+				}
+			}
+			if len(b.cache) >= dnsCacheMax {
+				clear(b.cache)
+			}
+		}
+		b.cache[key] = dnsEntry{ips: call.ips, expires: now.Add(dnsCacheTTL)}
+	}
+	b.dnsMu.Unlock()
+	close(call.done)
+}
+
+// resolve asks plain DNS (every server at once) and DNS over TLS. VPN clients
+// in strict-route mode drop plain DNS outside the tunnel, so DoT is the second
+// try; whichever worked last goes first next time. The name is queried as
+// rooted, so search domains a VPN pushed into the system config never apply.
+func (b *bypass) resolve(ctx context.Context, family, host string) ([]net.IP, error) {
+	name := host
+	if !strings.HasSuffix(name, ".") {
+		name += "."
+	}
+	type step struct {
+		secure bool
+		lookup func(context.Context) ([]net.IP, error)
+	}
+	plain := step{false, func(ctx context.Context) ([]net.IP, error) {
+		// Blocked DNS is silent; leave time for the other transport.
+		ctx, cancel := context.WithTimeout(ctx, plainDNSBudget)
+		defer cancel()
+		return raceLookup(ctx, b.plain, family, name)
+	}}
+	secure := step{true, func(ctx context.Context) ([]net.IP, error) { return b.secure.LookupIP(ctx, family, name) }}
+	steps := [2]step{plain, secure}
 	if b.dot.Load() {
-		resolvers[0], resolvers[1] = b.secure, b.plain
+		steps = [2]step{secure, plain}
 	}
 	var err error
-	for i, resolver := range resolvers {
-		attempt, cancel := ctx, context.CancelFunc(func() {})
-		if i == 0 {
-			// Blocked DNS is silent; leave time for the other transport.
-			attempt, cancel = context.WithTimeout(ctx, 2*time.Second)
-		}
+	for _, s := range steps {
 		var ips []net.IP
-		ips, err = resolver.LookupIP(attempt, family, host)
-		cancel()
-		if err == nil {
-			b.dot.Store(resolver == b.secure)
-			return ips, nil
+		if ips, err = s.lookup(ctx); err == nil {
+			b.dot.Store(s.secure)
+			return ipv4First(ips), nil
 		}
-		var dnsErr *net.DNSError
-		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		if notFound(err) {
 			break
 		}
 	}
 	return nil, err
 }
 
-func (b *bypass) dialDNS(ctx context.Context, network, _ string) (net.Conn, error) {
-	server := b.dns[int(b.next.Add(1))%len(b.dns)]
-	d := &net.Dialer{Timeout: 5 * time.Second, Control: b.control}
-	return d.DialContext(ctx, network, server)
+// raceLookup asks every resolver at once and returns the first answer, so one
+// blocked public resolver does not cost the whole plain-DNS budget.
+func raceLookup(ctx context.Context, resolvers []*net.Resolver, family, name string) ([]net.IP, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		ips []net.IP
+		err error
+	}
+	results := make(chan result, len(resolvers))
+	for _, r := range resolvers {
+		go func(r *net.Resolver) {
+			ips, err := r.LookupIP(ctx, family, name)
+			results <- result{ips, err}
+		}(r)
+	}
+	err := invalid("no DNS servers")
+	for range resolvers {
+		r := <-results
+		if r.err == nil {
+			return r.ips, nil
+		}
+		err = r.err
+		if notFound(err) {
+			break
+		}
+	}
+	return nil, err
+}
+
+func notFound(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
+}
+
+// ipv4First keeps resolver order within each family and tries IPv4 first:
+// the physical network almost always has it, IPv6 is not guaranteed.
+func ipv4First(ips []net.IP) []net.IP {
+	out := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			out = append(out, ip)
+		}
+	}
+	for _, ip := range ips {
+		if ip.To4() == nil {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+func (b *bypass) dialDNS(server string) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, _ string) (net.Conn, error) {
+		d := &net.Dialer{Timeout: 5 * time.Second, Control: b.control}
+		return d.DialContext(ctx, network, server)
+	}
 }
 
 // dialDoT opens DNS over TLS on port 853. The resolver frames queries for a
@@ -263,11 +420,27 @@ func (b *bypass) control(network, address string, c syscall.RawConn) error {
 	return nil
 }
 
-// pick is evaluated per connection: interfaces come and go with Wi-Fi and VPN.
+// pick is re-evaluated at most every pickTTL: interfaces come and go with
+// Wi-Fi and VPN, but listing them before every connect is expensive.
 func (b *bypass) pick() (*net.Interface, error) {
+	b.pickMu.Lock()
+	defer b.pickMu.Unlock()
+	if b.picked != nil && time.Since(b.pickedAt) < pickTTL {
+		return b.picked, nil
+	}
+	iface, err := b.choose()
+	if err != nil {
+		b.picked = nil
+		return nil, err
+	}
+	b.picked, b.pickedAt = iface, time.Now()
+	return iface, nil
+}
+
+func (b *bypass) choose() (*net.Interface, error) {
 	if b.iface != "" {
 		iface, err := net.InterfaceByName(b.iface)
-		if err != nil || iface.Flags&net.FlagUp == 0 {
+		if err != nil || iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagRunning == 0 {
 			return nil, ErrNoInterface
 		}
 		return iface, nil
@@ -300,7 +473,8 @@ func physicalCandidate(iface *net.Interface) bool {
 	}
 	addrs, _ := iface.Addrs()
 	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil && !ipnet.IP.IsLinkLocalUnicast() {
+		// Link-local addresses (169.254/16, fe80::/10) do not reach a gateway.
+		if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.IsGlobalUnicast() {
 			return true
 		}
 	}

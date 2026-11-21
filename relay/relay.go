@@ -136,9 +136,8 @@ func (r *Server) handle(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "invalid target", http.StatusBadRequest)
 		return
 	}
-	out := req.Clone(req.Context())
+	out := req.Clone(req.Context()) // Clone deep-copies the header.
 	out.RequestURI = ""
-	out.Header = req.Header.Clone()
 	stripHopHeaders(out.Header)
 	resp, e := r.transport.RoundTrip(out)
 	if e != nil {
@@ -153,7 +152,30 @@ func (r *Server) handle(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	copyFlushing(w, resp.Body)
+}
+
+// copyFlushing forwards a response body and flushes after every chunk, so
+// streamed responses (server-sent events, long polling) reach the browser as
+// they arrive instead of waiting for the response writer's buffer to fill.
+func copyFlushing(w http.ResponseWriter, body io.Reader) {
+	rc := http.NewResponseController(w)
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			if rc.Flush() != nil {
+				_, _ = io.CopyBuffer(w, body, buf) // unflushable writer: plain copy
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 func (r *Server) connect(w http.ResponseWriter, req *http.Request) {
@@ -204,17 +226,42 @@ func (r *Server) connect(w http.ResponseWriter, req *http.Request) {
 	if e = writeEstablished(client); e != nil {
 		return
 	}
+	// Bytes the browser sent right after the CONNECT headers are already in
+	// the hijacked buffer; forward them, then copy socket to socket so the
+	// kernel can splice when both ends are plain TCP.
+	if n := rw.Reader.Buffered(); n > 0 {
+		head, _ := rw.Peek(n)
+		if e = writeAll(up, head); e != nil {
+			return
+		}
+	}
 	done := make(chan struct{})
 	go func() {
-		_, _ = io.Copy(up, rw)
-		_ = up.Close()
-		_ = client.Close()
+		_, _ = io.Copy(up, client)
+		// The browser finished sending: pass the half-close on and keep
+		// reading the response.
+		closeWrite(up)
 		close(done)
 	}()
+	// The upstream side ending ends the tunnel: waiting for a browser that
+	// never closes would pin a concurrency slot forever.
 	_, _ = io.Copy(client, up)
 	_ = client.Close()
 	_ = up.Close()
 	<-done
+}
+
+// closeWrite half-closes c when it supports that and closes it otherwise.
+func closeWrite(c net.Conn) {
+	if cw, ok := c.(interface{ CloseWrite() error }); ok && cw.CloseWrite() == nil {
+		return
+	}
+	_ = c.Close()
+}
+
+func writeAll(w io.Writer, b []byte) error {
+	_, err := w.Write(b) // net.Conn.Write writes everything or returns an error
+	return err
 }
 
 func stripHopHeaders(h http.Header) {

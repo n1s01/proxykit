@@ -16,9 +16,13 @@ func (e LineError) Unwrap() error { return e.Err }
 
 // ParseLines preserves order and duplicates. Deduplication is application policy.
 // Empty lines and lines beginning with # are ignored; secrets are never echoed.
+// A leading UTF-8 byte order mark is ignored.
 func ParseLines(text string, opts ParseOptions) ([]Spec, []LineError) {
 	var specs []Spec
 	var errs []LineError
+	// Editors on Windows prefix UTF-8 files with a byte order mark, which
+	// TrimSpace does not remove; it would break the first line.
+	text = strings.TrimPrefix(text, "\ufeff")
 	for i, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {

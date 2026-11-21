@@ -92,3 +92,45 @@ func TestConnectHandlesInvalidDialerResults(t *testing.T) {
 		}
 	})
 }
+
+func TestRelayStreamsPlainHTTPResponses(t *testing.T) {
+	release := make(chan struct{})
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: first\n\n")
+		w.(http.Flusher).Flush()
+		<-release
+		_, _ = io.WriteString(w, "data: second\n\n")
+	}))
+	defer origin.Close()
+	defer close(release)
+	relay, err := Start(dialFunc(func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	proxyURL, _ := url.Parse(relay.URL())
+	tr := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+	defer tr.CloseIdleConnections()
+	resp, err := (&http.Client{Transport: tr, Timeout: 5 * time.Second}).Get(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	got := make(chan string, 1)
+	go func() {
+		b := make([]byte, len("data: first\n\n"))
+		_, _ = io.ReadFull(resp.Body, b)
+		got <- string(b)
+	}()
+	select {
+	case s := <-got:
+		if s != "data: first\n\n" {
+			t.Fatalf("first event %q", s)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first event was held back until the response ended")
+	}
+}

@@ -27,7 +27,8 @@
 //
 // # Platforms
 //
-// Bypass is implemented on darwin/ios, linux/android and windows. Everything
+// Bypass is implemented for desktop darwin, linux and windows (ios and
+// android compile through the same build tags but are not supported). Everything
 // OS-specific is in platform_<os>.go behind the platformBackend interface
 // (platform.go); CurrentPlatform reports what this binary was built with.
 //

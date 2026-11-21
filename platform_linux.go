@@ -1,6 +1,7 @@
 //go:build linux
 
-// Platform backend for Linux and Android (GOOS=android implies the linux tag).
+// Platform backend for desktop Linux. GOOS=android compiles through the linux
+// tag but is not a supported target.
 // Contract: platformBackend in platform.go.
 
 package proxykit
@@ -46,12 +47,19 @@ func (linuxBackend) defaultRoutes() []int {
 		return nil
 	}
 	defer f.Close()
+	// One interface dump for the whole table: InterfaceByName dumps every
+	// interface over netlink on each call.
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	indexes := make(map[string]int, len(ifaces))
+	for _, iface := range ifaces {
+		indexes[iface.Name] = iface.Index
+	}
 	return parseProcNetRoute(f, func(name string) (int, bool) {
-		iface, err := net.InterfaceByName(name)
-		if err != nil {
-			return 0, false
-		}
-		return iface.Index, true
+		index, ok := indexes[name]
+		return index, ok
 	})
 }
 
